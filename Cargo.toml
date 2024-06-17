@@ -1,0 +1,28 @@
+# cargo-features = ["codegen-backend", "profile-rustflags"]
+
+[package]
+name = "cosmic-dirstat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# bumpalo = { version = "3.16.0", features = ["allocator_api"] }
+humansize = "2.1.3"
+rayon = "1.10.0"
+rfd = { version = "0.14.1", default-features = false, features = [
+    "tokio",
+    "xdg-portal",
+] }
+treemap = "0.3.2"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+default-features = false
+features = ["winit", "wgpu", "tokio"]
+
+# [profile.dev]
+# codegen-backend = "cranelift"
+
+# [profile.dev.package."*"]
+# codegen-backend = "llvm"
+# opt-level = 2
