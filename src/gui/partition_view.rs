@@ -1,4 +1,9 @@
-use std::{path::PathBuf, sync::atomic::AtomicUsize};
+use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc, Mutex},
+};
 
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
@@ -11,7 +16,7 @@ use cosmic::{
 };
 use treemap::Mappable;
 
-use crate::analyze::{self, AnalyzedDir};
+use crate::analyze::{self, AnalyzedDir, AnalyzedItem};
 
 pub enum StateBoxD {
     Branched(Vec<StateBox>),
@@ -23,6 +28,7 @@ pub struct StateBox {
     placement: treemap::Rect,
     size: u64,
     name: String,
+    extension: Option<OsString>,
     analyzed_item: Option<analyze::AnalyzedItem>,
     idx: usize,
 }
@@ -56,25 +62,21 @@ impl StateBox {
         level: usize,
         to_highlight: usize,
         text_size: f32,
+        colors: &HashMap<OsString, Color>,
     ) -> Option<cosmic::iced_core::renderer::Quad> {
         let bounds = self.placement;
-
-        // let level = if self.idx == to_highlight { 0 } else { level };
-        let cols = [
-            0.0, 0.33, 0.66, 0.25, 0.75, 0.1, 0.5, 0.9, 0.0, 0.33, 0.66, 0.25, 0.75, 0.1, 0.5, 0.9,
-            0.0, 0.33, 0.66, 0.25, 0.75, 0.1, 0.5, 0.9, 0.0, 0.33, 0.66, 0.25, 0.75, 0.1, 0.5, 0.9,
-        ]
-        .map(|f| {
-            let base_col = cosmic::theme::active().cosmic().accent.base;
-            let new = ShiftHue::shift_hue(Okhsl::from_color(base_col.color), f * 360.0).darken(0.5);
-            let rgba = cosmic::cosmic_theme::palette::Srgb::from_color(new);
-            cosmic::iced::Color::from_linear_rgba(rgba.red, rgba.green, rgba.blue, 1.0)
-        });
 
         let quad_bounds = Rectangle::new(
             Point::new(bounds.x as f32 + at.0, bounds.y as f32 + at.1),
             Size::new(bounds.w as f32, bounds.h as f32),
         );
+
+        let col = self
+            .extension
+            .as_ref()
+            .map(|f| colors.get(f).copied())
+            .flatten()
+            .unwrap_or(Color::from_rgb8(100, 100, 100));
 
         renderer.fill_quad(
             cosmic::iced_core::renderer::Quad {
@@ -84,8 +86,8 @@ impl StateBox {
             },
             Background::Gradient(cosmic::iced::Gradient::Linear(
                 cosmic::iced::gradient::Linear::new(std::f32::consts::PI / 4.0)
-                    .add_stop(0.0, cols[level])
-                    .add_stop(1.0, cols[level].blend_alpha(Color::BLACK, 0.5)),
+                    .add_stop(0.0, col)
+                    .add_stop(1.0, col.blend_alpha(Color::BLACK, 0.5)),
             )),
         );
 
@@ -94,27 +96,33 @@ impl StateBox {
             if quad_bounds.height > text_size {
                 let mut bounds = quad_bounds.size();
                 bounds.height = text_size;
-                renderer.fill_text(
-                    cosmic::iced_core::text::Text {
-                        content: &self.name,
-                        bounds,
-                        size: text_size.into(),
-                        font: renderer.default_font(),
-                        horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
-                        vertical_alignment: cosmic::iced::alignment::Vertical::Top,
-                        line_height: text::LineHeight::default(),
-                        shaping: text::Shaping::Advanced,
-                    },
-                    Point::new(
-                        quad_bounds.x + 1.0,
-                        quad_bounds.y + 1.0, /* + text_size / 2.0*/
-                    ),
-                    Color::BLACK,
-                    quad_bounds,
+                // renderer.fill_text(
+                //     cosmic::iced_core::text::Text {
+                //         content: &self.name,
+                //         bounds,
+                //         size: text_size.into(),
+                //         font: renderer.default_font(),
+                //         horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
+                //         vertical_alignment: cosmic::iced::alignment::Vertical::Top,
+                //         line_height: text::LineHeight::default(),
+                //         shaping: text::Shaping::Advanced,
+                //         wrap: text::Wrap::WordOrGlyph,
+                //     },
+                //     Point::new(
+                //         quad_bounds.x + 1.0,
+                //         quad_bounds.y + 1.0, /* + text_size / 2.0*/
+                //     ),
+                //     Color::BLACK,
+                //     quad_bounds,
+                // );
+                let f = format!(
+                    "{} - {}",
+                    &self.name,
+                    humansize::format_size(self.size, humansize::FormatSizeOptions::default())
                 );
                 renderer.fill_text(
                     cosmic::iced_core::text::Text {
-                        content: &self.name,
+                        content: &f,
                         bounds,
                         size: text_size.into(),
                         font: renderer.default_font(),
@@ -122,6 +130,7 @@ impl StateBox {
                         vertical_alignment: cosmic::iced::alignment::Vertical::Top,
                         line_height: text::LineHeight::default(),
                         shaping: text::Shaping::Advanced,
+                        wrap: text::Wrap::WordOrGlyph,
                     },
                     Point::new(quad_bounds.x, quad_bounds.y /* + text_size / 2.0*/),
                     Color::WHITE.blend_alpha(Color::BLACK, 0.8),
@@ -136,6 +145,7 @@ impl StateBox {
                     level + 1,
                     to_highlight,
                     text_size,
+                    colors,
                 ) {
                     maybe_highlight = Some(r);
                 }
@@ -166,6 +176,10 @@ pub struct State {
     boxes: Vec<StateBox>,
     highlighted: usize,
     highlighted_popup: Option<(Point, String, u64, PathBuf)>,
+    /// Extension -> Number of Files
+    extension_map: HashMap<OsString, Color>,
+    contructed_for: Size<f32>,
+    constructed_for_path: PathBuf,
 }
 
 pub struct PartitionView<'a, Msg> {
@@ -173,6 +187,7 @@ pub struct PartitionView<'a, Msg> {
     text_size: f32,
     minimum_area: f32,
     on_click: Box<dyn FnMut(PathBuf) -> Msg>,
+    extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
 }
 impl<'a, Msg> PartitionView<'a, Msg> {
     pub fn new(
@@ -180,12 +195,14 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         text_size: f32,
         minimum_area: f32,
         on_click: impl FnMut(PathBuf) -> Msg + 'static,
+        extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
     ) -> Self {
         Self {
             items,
             text_size,
             minimum_area,
             on_click: Box::new(on_click),
+            extension_map,
         }
     }
 }
@@ -201,6 +218,9 @@ impl<
             boxes: vec![],
             highlighted: usize::MAX,
             highlighted_popup: None,
+            extension_map: Default::default(),
+            contructed_for: Size::ZERO,
+            constructed_for_path: Default::default(),
         }))
     }
 
@@ -221,65 +241,119 @@ impl<
 
         let state: &mut State = tree.state.downcast_mut();
 
-        fn recursive_box(
-            space: (f64, f64),
-            min: f64,
-            dir: &AnalyzedDir,
-            text_offset: f64,
-            text_size: f32,
-        ) -> Vec<StateBox> {
-            static IDX: AtomicUsize = AtomicUsize::new(0);
+        if layout.bounds().size() != state.contructed_for
+            || self.items.path != state.constructed_for_path
+        {
+            fn recursive_box(
+                space: (f64, f64),
+                min: f64,
+                dir: &AnalyzedDir,
+                text_offset: f64,
+                text_size: f32,
+                extension_map: &mut HashMap<OsString, usize>,
+            ) -> Vec<StateBox> {
+                static IDX: AtomicUsize = AtomicUsize::new(0);
 
-            if space.1 < text_offset * 1.4 {
-                return vec![];
+                if space.1 < text_offset * 1.4 {
+                    return vec![];
+                }
+
+                let partitioned =
+                    analyze::partition((space.0, text_offset.mul_add(-1.4, space.1)), min, dir);
+
+                partitioned
+                    .into_iter()
+                    .map(|mut item| {
+                        let mut bounds_ = *item.bounds();
+                        bounds_.y += text_offset * 1.4;
+                        item.set_bounds(bounds_);
+                        // dbg!(opt_dir);
+                        let d = match item.item {
+                            Some(analyze::AnalyzedItem::Dir(d)) => {
+                                StateBoxD::Branched(recursive_box(
+                                    (item.bounds().w, item.bounds().h),
+                                    min,
+                                    d,
+                                    text_offset,
+                                    text_size,
+                                    extension_map,
+                                ))
+                            }
+                            _ => StateBoxD::Leaf,
+                        };
+
+                        let ext = item.item.and_then(|f| {
+                            if let AnalyzedItem::File(f) = f {
+                                f.path.extension()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(ext) = ext {
+                            if extension_map.contains_key(ext) {
+                                *extension_map.get_mut(ext).unwrap() += item.size as usize;
+                            } else {
+                                extension_map.insert(ext.to_owned(), item.size as _);
+                            }
+                        }
+
+                        StateBox {
+                            d,
+                            name: item.item.map_or("<files>".into(), |f| {
+                                f.name()
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            }),
+                            idx: IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            analyzed_item: item.item.cloned(),
+                            placement: item.placement,
+                            size: item.size,
+                            extension: ext.map(|f| f.to_os_string()),
+                        }
+                    })
+                    .collect()
             }
 
-            let partitioned =
-                analyze::partition((space.0, text_offset.mul_add(-1.4, space.1)), min, dir);
+            let mut extension_map = Default::default();
+            state.boxes = recursive_box(
+                (
+                    f64::from(layout.bounds().width),
+                    f64::from(layout.bounds().height),
+                ),
+                f64::from(self.minimum_area),
+                self.items,
+                f64::from(self.text_size),
+                self.text_size,
+                &mut extension_map,
+            );
 
-            partitioned
+            let len = extension_map.len();
+
+            let base_col = cosmic::theme::active().cosmic().accent.base;
+            let cols = Vec::from_iter((0usize..).take(extension_map.len()).map(|f| {
+                let shifted = (f as f32 * 1.618).rem_euclid(1.0);
+
+                let new = ShiftHue::shift_hue(Okhsl::from_color(base_col.color), shifted * 360.0)
+                    .darken(0.5);
+                let rgba = cosmic::cosmic_theme::palette::Srgb::from_color(new);
+                cosmic::iced::Color::from_linear_rgba(rgba.red, rgba.green, rgba.blue, 1.0)
+            }));
+            let mut ext = extension_map.into_iter().collect::<Vec<_>>();
+            ext.sort_by_key(|f| f.1);
+
+            let mut lock = self.extension_map.lock().unwrap();
+            *lock = ext
                 .into_iter()
-                .map(|mut item| {
-                    let mut bounds_ = *item.bounds();
-                    bounds_.y += text_offset * 1.4;
-                    item.set_bounds(bounds_);
-                    // dbg!(opt_dir);
-                    let d = match item.item {
-                        Some(analyze::AnalyzedItem::Dir(d)) => StateBoxD::Branched(recursive_box(
-                            (item.bounds().w, item.bounds().h),
-                            min,
-                            d,
-                            text_offset,
-                            text_size,
-                        )),
-                        _ => StateBoxD::Leaf,
-                    };
-                    StateBox {
-                        d,
-                        name: item.item.map_or("<files>".into(), |f| {
-                            f.name()
-                                .map(|f| f.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        }),
-                        idx: IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        analyzed_item: item.item.cloned(),
-                        placement: item.placement,
-                        size: item.size,
-                    }
-                })
-                .collect()
-        }
+                .rev()
+                .enumerate()
+                .take(len)
+                .map(|(index, f)| (f.0, cols[index]))
+                .collect();
 
-        state.boxes = recursive_box(
-            (
-                f64::from(layout.bounds().width),
-                f64::from(layout.bounds().height),
-            ),
-            f64::from(self.minimum_area),
-            self.items,
-            f64::from(self.text_size),
-            self.text_size,
-        );
+            state.extension_map = lock.clone().into_iter().collect();
+            state.contructed_for = layout.bounds().size();
+            state.constructed_for_path = self.items.path.clone();
+        }
 
         layout
     }
@@ -363,6 +437,7 @@ impl<
                 0,
                 state.highlighted,
                 self.text_size,
+                &state.extension_map,
             ) {
                 highlight = Some(r);
             }
@@ -452,7 +527,7 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                 },
                 // shadow: Default::default(),
             },
-            Background::Color(Color::BLACK.blend_alpha(Color::WHITE, 0.5)),
+            Background::Color(Color::BLACK.blend_alpha(Color::WHITE, 0.75)),
         );
 
         let string = format!(
@@ -462,6 +537,22 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
             self.path.display()
         );
 
+        // renderer.fill_text(
+        //     cosmic::iced_core::text::Text {
+        //         content: &string,
+        //         bounds: bounds.size(),
+        //         size: self.text_size.into(),
+        //         font: renderer.default_font(),
+        //         horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
+        //         vertical_alignment: cosmic::iced::alignment::Vertical::Top,
+        //         line_height: text::LineHeight::default(),
+        //         shaping: text::Shaping::Advanced,
+        //         wrap: text::Wrap::WordOrGlyph,
+        //     },
+        //     Point::new(bounds.x + 1.0, bounds.y + 1.0 /* + text_size / 2.0*/),
+        //     Color::BLACK,
+        //     bounds,
+        // );
         renderer.fill_text(
             cosmic::iced_core::text::Text {
                 content: &string,
@@ -472,21 +563,7 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                 vertical_alignment: cosmic::iced::alignment::Vertical::Top,
                 line_height: text::LineHeight::default(),
                 shaping: text::Shaping::Advanced,
-            },
-            Point::new(bounds.x + 1.0, bounds.y + 1.0 /* + text_size / 2.0*/),
-            Color::BLACK,
-            bounds,
-        );
-        renderer.fill_text(
-            cosmic::iced_core::text::Text {
-                content: &string,
-                bounds: bounds.size(),
-                size: self.text_size.into(),
-                font: renderer.default_font(),
-                horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
-                vertical_alignment: cosmic::iced::alignment::Vertical::Top,
-                line_height: text::LineHeight::default(),
-                shaping: text::Shaping::Advanced,
+                wrap: text::Wrap::WordOrGlyph,
             },
             Point::new(bounds.x, bounds.y /* + text_size / 2.0*/),
             Color::WHITE.blend_alpha(Color::BLACK, 0.8),

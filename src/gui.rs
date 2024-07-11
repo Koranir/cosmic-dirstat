@@ -1,10 +1,17 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 mod partition_view;
+mod partition_view_legend;
 
 use cosmic::{
-    iced::{alignment::Horizontal, Length},
-    widget,
+    iced::{alignment::Horizontal, Background, Color, Length, Subscription},
+    iced_widget::{row, scrollable},
+    widget::{self, container, grid},
 };
 
 pub fn run() {
@@ -21,6 +28,8 @@ enum Msg {
     Analyzed(Arc<crate::analyze::AnalyzedDir>),
     AnalyzedError(String),
     ClearError,
+    // TODO: Really bad hack to get the legend working correctly, remove once calculations are asynchronous
+    Reframe,
 }
 
 enum Panels {
@@ -36,6 +45,7 @@ struct App {
     state: cosmic::widget::pane_grid::State<Panels>,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
+    extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
 }
 impl App {
     pub fn tree_view(&self) -> cosmic::Element<Msg> {
@@ -43,7 +53,25 @@ impl App {
 
         let heading = text::heading("Tree");
 
-        column::with_children(vec![heading.into()])
+        let mut grid = grid();
+        let lock = self.extension_map.lock().unwrap();
+        let lock_iter = lock.iter();
+        for (name, col) in lock_iter {
+            let name = name.to_string_lossy().into_owned();
+            let col = *col;
+            let name = text(name);
+            let col = container(widget::Space::new(10.0, 10.0)).style(
+                cosmic::theme::Container::custom(move |t| container::Appearance {
+                    background: Some(Background::Color(col)),
+                    ..Default::default()
+                }),
+            );
+            grid = grid.push(col).push(name).insert_row();
+        }
+        drop(lock);
+        let thing = scrollable(grid.row_alignment(cosmic::iced::Alignment::Center))
+            .style(cosmic::theme::iced::Scrollable::Permanent);
+        column::Column::with_children(vec![heading.into(), thing.into()])
             .padding(10.0)
             .into()
     }
@@ -69,7 +97,14 @@ impl App {
         let go_up_button = container(go_up_button).align_x(Horizontal::Right);
         let heading = row::with_children(vec![heading_text.into(), go_up_button.into()]);
         let d = match &self.analyzed {
-            Some(d) => partition_view::PartitionView::new(d, 8.0, 8.0 * 8.0, Msg::Crawl).into(),
+            Some(d) => partition_view::PartitionView::new(
+                d,
+                8.0,
+                8.0 * 8.0,
+                Msg::Crawl,
+                self.extension_map.clone(),
+            )
+            .into(),
             None => text("No Directory Analyzed").into(),
         };
 
@@ -136,6 +171,10 @@ impl cosmic::Application for App {
         &mut self.core
     }
 
+    fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
+        cosmic::iced::time::every(Duration::from_millis(100)).map(|_| Msg::Reframe)
+    }
+
     fn init(
         mut core: cosmic::app::Core,
         _flags: Self::Flags,
@@ -167,6 +206,7 @@ impl cosmic::Application for App {
             state,
             analyzed: None,
             error: None,
+            extension_map: Arc::new(Mutex::new(Default::default())),
         };
 
         (app, cosmic::Command::none())
@@ -181,9 +221,14 @@ impl cosmic::Application for App {
                     self.crawl_path.to_string_lossy().into_owned()
                 ));
             }
-            Msg::Crawl(p) => {
+            Msg::Crawl(s) => {
+                self.crawl_path = s.clone();
+                self.core.set_header_title(format!(
+                    "COSMIC DirStat - {}",
+                    self.crawl_path.to_string_lossy().into_owned()
+                ));
                 return cosmic::Command::perform(
-                    async move { crate::analyze::analyze_dir(&p, &crate::analyze::Context {}) },
+                    async move { crate::analyze::analyze_dir(&s, &crate::analyze::Context {}) },
                     |a| {
                         match a {
                             Ok(a) => Msg::Analyzed(Arc::new(a)),
@@ -220,6 +265,7 @@ impl cosmic::Application for App {
                 self.error = Some(e);
             }
             Msg::ClearError => self.error = None,
+            Msg::Reframe => {}
         }
 
         cosmic::Command::none()
