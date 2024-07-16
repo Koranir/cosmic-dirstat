@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    ffi::{OsStr, OsString},
-    path::PathBuf,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
-};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::atomic::AtomicUsize};
 
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
@@ -59,7 +54,7 @@ impl StateBox {
         &self,
         at: (f32, f32),
         renderer: &mut R,
-        level: usize,
+        // level: usize,
         to_highlight: usize,
         text_size: f32,
         colors: &HashMap<OsString, Color>,
@@ -74,8 +69,7 @@ impl StateBox {
         let col = self
             .extension
             .as_ref()
-            .map(|f| colors.get(f).copied())
-            .flatten()
+            .and_then(|f| colors.get(f).copied())
             .unwrap_or(Color::from_rgb8(100, 100, 100));
 
         renderer.fill_quad(
@@ -142,7 +136,7 @@ impl StateBox {
                 if let Some(r) = ele.draw(
                     (quad_bounds.x, quad_bounds.y),
                     renderer,
-                    level + 1,
+                    // level + 1,
                     to_highlight,
                     text_size,
                     colors,
@@ -177,17 +171,21 @@ pub struct State {
     highlighted: usize,
     highlighted_popup: Option<(Point, String, u64, PathBuf)>,
     /// Extension -> Number of Files
+    ordered_extension_map: Vec<(OsString, Color)>,
     extension_map: HashMap<OsString, Color>,
     contructed_for: Size<f32>,
     constructed_for_path: PathBuf,
+    should_broadcast_ordered: bool,
 }
 
+#[allow(clippy::type_complexity)]
 pub struct PartitionView<'a, Msg> {
     items: &'a AnalyzedDir,
     text_size: f32,
     minimum_area: f32,
     on_click: Box<dyn FnMut(PathBuf) -> Msg>,
-    extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+    on_colors: Box<dyn FnMut(Vec<(OsString, Color)>) -> Msg>,
+    // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
 }
 impl<'a, Msg> PartitionView<'a, Msg> {
     pub fn new(
@@ -195,14 +193,16 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         text_size: f32,
         minimum_area: f32,
         on_click: impl FnMut(PathBuf) -> Msg + 'static,
-        extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+        on_colors: impl FnMut(Vec<(OsString, Color)>) -> Msg + 'static,
+        // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
     ) -> Self {
         Self {
             items,
             text_size,
             minimum_area,
             on_click: Box::new(on_click),
-            extension_map,
+            // extension_map,
+            on_colors: Box::new(on_colors),
         }
     }
 }
@@ -221,6 +221,8 @@ impl<
             extension_map: Default::default(),
             contructed_for: Size::ZERO,
             constructed_for_path: Default::default(),
+            ordered_extension_map: Vec::new(),
+            should_broadcast_ordered: false,
         }))
     }
 
@@ -249,7 +251,7 @@ impl<
                 min: f64,
                 dir: &AnalyzedDir,
                 text_offset: f64,
-                text_size: f32,
+                // text_size: f32,
                 extension_map: &mut HashMap<OsString, usize>,
             ) -> Vec<StateBox> {
                 static IDX: AtomicUsize = AtomicUsize::new(0);
@@ -275,7 +277,7 @@ impl<
                                     min,
                                     d,
                                     text_offset,
-                                    text_size,
+                                    // text_size,
                                     extension_map,
                                 ))
                             }
@@ -323,7 +325,7 @@ impl<
                 f64::from(self.minimum_area),
                 self.items,
                 f64::from(self.text_size),
-                self.text_size,
+                // self.text_size,
                 &mut extension_map,
             );
 
@@ -341,16 +343,16 @@ impl<
             let mut ext = extension_map.into_iter().collect::<Vec<_>>();
             ext.sort_by_key(|f| f.1);
 
-            let mut lock = self.extension_map.lock().unwrap();
-            *lock = ext
+            state.should_broadcast_ordered = true;
+
+            state.ordered_extension_map = ext
                 .into_iter()
                 .rev()
                 .enumerate()
                 .take(len)
                 .map(|(index, f)| (f.0, cols[index]))
                 .collect();
-
-            state.extension_map = lock.clone().into_iter().collect();
+            state.extension_map = state.ordered_extension_map.clone().into_iter().collect();
             state.contructed_for = layout.bounds().size();
             state.constructed_for_path = self.items.path.clone();
         }
@@ -370,6 +372,11 @@ impl<
         _viewport: &Rectangle,
     ) -> cosmic::iced_core::event::Status {
         let state: &mut State = state.state.downcast_mut();
+
+        if state.should_broadcast_ordered {
+            state.should_broadcast_ordered = false;
+            shell.publish((self.on_colors)(state.ordered_extension_map.clone()));
+        }
 
         if let cosmic::iced::Event::Mouse(mev) = event {
             let pos = cursor.position().unwrap_or_default();
@@ -434,7 +441,7 @@ impl<
             if let Some(r) = ele.draw(
                 (layout.bounds().x, layout.bounds().y),
                 renderer,
-                0,
+                // 0,
                 state.highlighted,
                 self.text_size,
                 &state.extension_map,

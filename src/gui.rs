@@ -1,16 +1,10 @@
-use std::{
-    ffi::OsString,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 mod partition_view;
-mod partition_view_legend;
 
 use cosmic::{
-    iced::{alignment::Horizontal, Background, Color, Length, Subscription},
-    iced_widget::{row, scrollable},
+    iced::{alignment::Horizontal, Background, Color, Length},
+    iced_widget::scrollable,
     widget::{self, container, grid},
 };
 
@@ -24,12 +18,11 @@ enum Msg {
     CrawlPath { cancel: bool },
     CrawlPathDialogue,
     Crawl(PathBuf),
+    ExtensionLegendChanged(Vec<(OsString, Color)>),
     PaneResize(cosmic::widget::pane_grid::ResizeEvent),
     Analyzed(Arc<crate::analyze::AnalyzedDir>),
     AnalyzedError(String),
     ClearError,
-    // TODO: Really bad hack to get the legend working correctly, remove once calculations are asynchronous
-    Reframe,
 }
 
 enum Panels {
@@ -45,33 +38,30 @@ struct App {
     state: cosmic::widget::pane_grid::State<Panels>,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
-    extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+    extensions_ordered: Vec<(OsString, Color)>,
 }
 impl App {
     pub fn tree_view(&self) -> cosmic::Element<Msg> {
         use cosmic::widget::{column, text};
 
-        let heading = text::heading("Tree");
+        let heading = text::heading("Legend");
 
         let mut grid = grid();
-        let lock = self.extension_map.lock().unwrap();
-        let lock_iter = lock.iter();
-        for (name, col) in lock_iter {
+        for (name, col) in self.extensions_ordered.iter() {
             let name = name.to_string_lossy().into_owned();
             let col = *col;
             let name = text(name);
             let col = container(widget::Space::new(10.0, 10.0)).style(
-                cosmic::theme::Container::custom(move |t| container::Appearance {
+                cosmic::theme::Container::custom(move |_theme| container::Appearance {
                     background: Some(Background::Color(col)),
                     ..Default::default()
                 }),
             );
             grid = grid.push(col).push(name).insert_row();
         }
-        drop(lock);
-        let thing = scrollable(grid.row_alignment(cosmic::iced::Alignment::Center))
+        let legend = scrollable(grid.row_alignment(cosmic::iced::Alignment::Center))
             .style(cosmic::theme::iced::Scrollable::Permanent);
-        column::Column::with_children(vec![heading.into(), thing.into()])
+        column::Column::with_children(vec![heading.into(), legend.into()])
             .padding(10.0)
             .into()
     }
@@ -80,7 +70,7 @@ impl App {
         use cosmic::widget::{button, column, container, icon, row, text};
 
         let heading_text = text::heading(format!(
-            "Partition{}{}",
+            "Directory{}{}",
             if self.analyzed.is_some() { " - " } else { "" },
             self.analyzed
                 .as_ref()
@@ -102,7 +92,7 @@ impl App {
                 8.0,
                 8.0 * 8.0,
                 Msg::Crawl,
-                self.extension_map.clone(),
+                Msg::ExtensionLegendChanged,
             )
             .into(),
             None => text("No Directory Analyzed").into(),
@@ -171,10 +161,6 @@ impl cosmic::Application for App {
         &mut self.core
     }
 
-    fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
-        cosmic::iced::time::every(Duration::from_millis(100)).map(|_| Msg::Reframe)
-    }
-
     fn init(
         mut core: cosmic::app::Core,
         _flags: Self::Flags,
@@ -195,7 +181,7 @@ impl cosmic::Application for App {
                 Panels::NamePath,
             )
             .unwrap();
-        state.resize(name_path_tree_split, 0.66);
+        state.resize(name_path_tree_split, 0.4);
 
         core.set_header_title("COSMIC DirStat".into());
 
@@ -206,7 +192,7 @@ impl cosmic::Application for App {
             state,
             analyzed: None,
             error: None,
-            extension_map: Arc::new(Mutex::new(Default::default())),
+            extensions_ordered: Vec::new(),
         };
 
         (app, cosmic::Command::none())
@@ -265,7 +251,7 @@ impl cosmic::Application for App {
                 self.error = Some(e);
             }
             Msg::ClearError => self.error = None,
-            Msg::Reframe => {}
+            Msg::ExtensionLegendChanged(l) => self.extensions_ordered = l,
         }
 
         cosmic::Command::none()
