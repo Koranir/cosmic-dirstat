@@ -1025,7 +1025,6 @@ version = "0.1.0"
 dependencies = [
  "humansize",
  "libcosmic",
- "rayon",
  "rfd",
  "treemap",
 ]

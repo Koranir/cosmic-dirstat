@@ -1,14 +1,14 @@
-# cargo-features = ["codegen-backend", "profile-rustflags"]
-
 [package]
 name = "cosmic-dirstat"
+authors = ["Daniel Yoon <daniel@yoon.com.au>"]
+description = "WIP - KDirStat-esque disk usage analyzer using the libcosmic toolkit"
+repository = "https://github.com/Koranir/cosmic-dirstat"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [dependencies]
-# bumpalo = { version = "3.16.0", features = ["allocator_api"] }
 humansize = "2.1.3"
-rayon = "1.10.0"
 rfd = { version = "0.14.1", default-features = false, features = [
     "tokio",
     "xdg-portal",
@@ -19,10 +19,3 @@ treemap = "0.3.2"
 git = "https://github.com/pop-os/libcosmic"
 default-features = false
 features = ["winit", "wgpu", "tokio"]
-
-# [profile.dev]
-# codegen-backend = "cranelift"
-
-# [profile.dev.package."*"]
-# codegen-backend = "llvm"
-# opt-level = 2
