@@ -3,7 +3,7 @@ use std::{ffi::OsString, path::PathBuf, sync::Arc};
 mod partition_view;
 
 use cosmic::{
-    iced::{alignment::Horizontal, Background, Color, Length},
+    iced::{alignment::Horizontal, Color, Length, Point},
     iced_widget::scrollable,
     widget::{self, container, grid},
 };
@@ -23,6 +23,7 @@ enum Msg {
     Analyzed(Arc<crate::analyze::AnalyzedDir>),
     AnalyzedError(String),
     ClearError,
+    NewItemHighlighted(Option<(Point, String, u64, PathBuf)>),
 }
 
 enum Panels {
@@ -39,6 +40,7 @@ struct App {
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
+    highlighted: Option<(Point, String, u64, PathBuf)>,
 }
 impl App {
     pub fn tree_view(&self) -> cosmic::Element<Msg> {
@@ -51,16 +53,22 @@ impl App {
             let name = name.to_string_lossy().into_owned();
             let col = *col;
             let name = text(name);
-            let col = container(widget::Space::new(10.0, 10.0)).style(
-                cosmic::theme::Container::custom(move |_theme| container::Appearance {
-                    background: Some(Background::Color(col)),
-                    ..Default::default()
+            let col = container(widget::Space::new(10.0, 10.0)).class(
+                cosmic::theme::Container::custom(move |theme| {
+                    container::Style {
+                        background: Some(col.into()),
+                        ..cosmic::widget::container::Catalog::style(
+                            theme,
+                            &cosmic::theme::Container::Card,
+                        )
+                    }
+                    .border(cosmic::iced::border::rounded(2.))
                 }),
             );
+            // .class(cosmic::widget::container::Style::default().background(col));
             grid = grid.push(col).push(name).insert_row();
         }
-        let legend = scrollable(grid.row_alignment(cosmic::iced::Alignment::Center))
-            .style(cosmic::theme::iced::Scrollable::Permanent);
+        let legend = scrollable(grid.row_alignment(cosmic::iced::Alignment::Center));
         column::Column::with_children(vec![heading.into(), legend.into()])
             .padding(10.0)
             .into()
@@ -78,7 +86,7 @@ impl App {
                 .unwrap_or_default()
         ))
         .width(Length::FillPortion(2));
-        let go_up_button = button(icon(icon::from_name("go-up-symbolic").handle())).on_press_maybe(
+        let go_up_button = button::icon(icon::from_name("go-up-symbolic").handle()).on_press_maybe(
             self.analyzed
                 .as_ref()
                 .and_then(|f| f.path.parent().map(std::borrow::ToOwned::to_owned))
@@ -87,13 +95,31 @@ impl App {
         let go_up_button = container(go_up_button).align_x(Horizontal::Right);
         let heading = row::with_children(vec![heading_text.into(), go_up_button.into()]);
         let d = match &self.analyzed {
-            Some(d) => partition_view::PartitionView::new(
-                d,
-                8.0,
-                8.0 * 8.0,
-                Msg::Crawl,
-                Msg::ExtensionLegendChanged,
+            Some(d) => cosmic::widget::tooltip(
+                partition_view::PartitionView::new(
+                    d,
+                    8.0,
+                    8.0 * 8.0,
+                    Msg::Crawl,
+                    Msg::ExtensionLegendChanged,
+                    Msg::NewItemHighlighted,
+                ),
+                match self.highlighted.as_ref() {
+                    Some(s) => cosmic::widget::column()
+                        .push(cosmic::widget::text(s.1.as_str()))
+                        .push(cosmic::widget::text(humansize::format_size(
+                            s.2,
+                            humansize::DECIMAL,
+                        )))
+                        .push(cosmic::widget::text(s.3.to_string_lossy()))
+                        .into(),
+                    None => cosmic::iced::Element::new(cosmic::widget::Space::with_width(
+                        cosmic::iced::Length::Shrink,
+                    )),
+                },
+                widget::tooltip::Position::FollowCursor,
             )
+            .class(cosmic::theme::Container::Card)
             .into(),
             None => text("No Directory Analyzed").into(),
         };
@@ -111,7 +137,7 @@ impl App {
 
         let title_box = container(
             column::with_children(vec![title.into(), sub.into()])
-                .align_items(cosmic::iced::Alignment::End)
+                .align_x(cosmic::iced::Alignment::End)
                 .height(Length::Fill)
                 .width(Length::Fill),
         )
@@ -119,21 +145,21 @@ impl App {
 
         let path_input = text_input("path/to/analyzed/dir", self.crawl_path.to_string_lossy())
             .on_input(|f| Msg::CrawlPathChanged(PathBuf::from(f)));
-        let submit_button = button(if !self.crawling_path {
+        let submit_button = button::standard(if !self.crawling_path {
             "Scan"
         } else {
             "Cancel"
         })
-        .on_press_down(Msg::CrawlPath {
+        .on_press(Msg::CrawlPath {
             cancel: self.crawling_path,
         });
 
-        let open_folder = button(icon(icon::from_name("folder-open-symbolic").handle()))
+        let open_folder = button::icon(icon::from_name("folder-open-symbolic").handle())
             .on_press(Msg::CrawlPathDialogue);
 
         let path_input = row::with_children(vec![path_input.into(), open_folder.into()])
             .spacing(5.0)
-            .align_items(cosmic::iced::Alignment::Center);
+            .align_y(cosmic::iced::Alignment::Center);
 
         let input_box =
             column::with_children(vec![path_input.into(), submit_button.into()]).spacing(5.0);
@@ -164,7 +190,7 @@ impl cosmic::Application for App {
     fn init(
         mut core: cosmic::app::Core,
         _flags: Self::Flags,
-    ) -> (Self, cosmic::app::Command<Self::Message>) {
+    ) -> (Self, cosmic::app::Task<Self::Message>) {
         let (mut state, tree_panel) = cosmic::widget::pane_grid::State::new(Panels::Tree);
         let (_partitioned_panel, header_partitioned_split) = state
             .split(
@@ -193,12 +219,13 @@ impl cosmic::Application for App {
             analyzed: None,
             error: None,
             extensions_ordered: Vec::new(),
+            highlighted: None,
         };
 
-        (app, cosmic::Command::none())
+        (app, cosmic::Task::none())
     }
 
-    fn update(&mut self, message: Self::Message) -> cosmic::app::Command<Self::Message> {
+    fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
         match message {
             Msg::CrawlPathChanged(s) => {
                 self.crawl_path = s;
@@ -213,7 +240,7 @@ impl cosmic::Application for App {
                     "COSMIC DirStat - {}",
                     self.crawl_path.to_string_lossy().into_owned()
                 ));
-                return cosmic::Command::perform(
+                return cosmic::Task::perform(
                     async move { crate::analyze::analyze_dir(&s, &crate::analyze::Context {}) },
                     |a| {
                         match a {
@@ -234,12 +261,13 @@ impl cosmic::Application for App {
                 self.crawling_path = false;
             }
             Msg::CrawlPathDialogue => {
-                return cosmic::Command::perform(rfd::AsyncFileDialog::new().pick_folder(), |f| {
-                    match f {
+                return cosmic::Task::perform(
+                    rfd::AsyncFileDialog::new().pick_folder(),
+                    |f| match f {
                         Some(f) => Msg::CrawlPathChanged(f.path().to_path_buf()).into(),
                         None => cosmic::app::Message::None,
-                    }
-                });
+                    },
+                );
             }
             Msg::PaneResize(f) => self.state.resize(f.split, f.ratio),
             Msg::Analyzed(a) => {
@@ -252,17 +280,20 @@ impl cosmic::Application for App {
             }
             Msg::ClearError => self.error = None,
             Msg::ExtensionLegendChanged(l) => self.extensions_ordered = l,
+            Msg::NewItemHighlighted(h) => match h {
+                Some(s) => self.highlighted = Some(s),
+                None => self.highlighted = None,
+            },
         }
 
-        cosmic::Command::none()
+        cosmic::Task::none()
     }
 
     fn dialog(&self) -> Option<cosmic::Element<Self::Message>> {
         self.error.as_ref().map(|e| {
-            cosmic::widget::dialog(format!("Error: {e}"))
-                .primary_action(
-                    cosmic::widget::button(cosmic::widget::text("OK")).on_press(Msg::ClearError),
-                )
+            cosmic::widget::dialog()
+                .title(format!("Error: {e}"))
+                .primary_action(cosmic::widget::button::standard("OK").on_press(Msg::ClearError))
                 .into()
         })
     }
@@ -274,17 +305,17 @@ impl cosmic::Application for App {
             cosmic::widget::pane_grid::PaneGrid::new(&self.state, move |_pane, t, _maximized| {
                 match t {
                     Panels::NamePath => container(self.path_and_title())
-                        .style(cosmic::theme::Container::Card)
+                        .class(cosmic::theme::Container::Card)
                         .height(Length::FillPortion(2))
                         .width(Length::FillPortion(1))
                         .into(),
                     Panels::Tree => container(self.tree_view())
-                        .style(cosmic::theme::Container::Card)
+                        .class(cosmic::theme::Container::Card)
                         .height(Length::FillPortion(2))
                         .width(Length::FillPortion(2))
                         .into(),
                     Panels::Partioned => container(self.partition_view())
-                        .style(cosmic::theme::Container::Card)
+                        .class(cosmic::theme::Container::Card)
                         .height(Length::FillPortion(3))
                         .width(Length::Fill)
                         .into(),

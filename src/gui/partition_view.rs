@@ -115,8 +115,8 @@ impl StateBox {
                     humansize::format_size(self.size, humansize::FormatSizeOptions::default())
                 );
                 renderer.fill_text(
-                    cosmic::iced_core::text::Text {
-                        content: &f,
+                    cosmic::iced_core::Text {
+                        content: f,
                         bounds,
                         size: text_size.into(),
                         font: renderer.default_font(),
@@ -124,7 +124,7 @@ impl StateBox {
                         vertical_alignment: cosmic::iced::alignment::Vertical::Top,
                         line_height: text::LineHeight::default(),
                         shaping: text::Shaping::Advanced,
-                        wrap: text::Wrap::WordOrGlyph,
+                        wrapping: text::Wrapping::WordOrGlyph,
                     },
                     Point::new(quad_bounds.x, quad_bounds.y /* + text_size / 2.0*/),
                     Color::WHITE.blend_alpha(Color::BLACK, 0.8),
@@ -169,7 +169,7 @@ impl StateBox {
 pub struct State {
     boxes: Vec<StateBox>,
     highlighted: usize,
-    highlighted_popup: Option<(Point, String, u64, PathBuf)>,
+    // highlighted_popup: Option<(Point, String, u64, PathBuf)>,
     /// Extension -> Number of Files
     ordered_extension_map: Vec<(OsString, Color)>,
     extension_map: HashMap<OsString, Color>,
@@ -185,7 +185,7 @@ pub struct PartitionView<'a, Msg> {
     minimum_area: f32,
     on_click: Box<dyn FnMut(PathBuf) -> Msg>,
     on_colors: Box<dyn FnMut(Vec<(OsString, Color)>) -> Msg>,
-    // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+    on_item_hovered: Box<dyn FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg>, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
 }
 impl<'a, Msg> PartitionView<'a, Msg> {
     pub fn new(
@@ -194,7 +194,7 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         minimum_area: f32,
         on_click: impl FnMut(PathBuf) -> Msg + 'static,
         on_colors: impl FnMut(Vec<(OsString, Color)>) -> Msg + 'static,
-        // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+        on_item_hovered: impl FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg + 'static, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
     ) -> Self {
         Self {
             items,
@@ -203,6 +203,7 @@ impl<'a, Msg> PartitionView<'a, Msg> {
             on_click: Box::new(on_click),
             // extension_map,
             on_colors: Box::new(on_colors),
+            on_item_hovered: Box::new(on_item_hovered),
         }
     }
 }
@@ -217,7 +218,7 @@ impl<
         cosmic::iced_core::widget::tree::State::Some(Box::new(State {
             boxes: vec![],
             highlighted: usize::MAX,
-            highlighted_popup: None,
+            // highlighted_popup: None,
             extension_map: Default::default(),
             contructed_for: Size::ZERO,
             constructed_for_path: Default::default(),
@@ -386,7 +387,7 @@ impl<
             });
             match mev {
                 cosmic::iced::mouse::Event::CursorMoved { position: _ } => {
-                    state.highlighted_popup = highlighted.map(|(f, _)| {
+                    shell.publish((self.on_item_hovered)(highlighted.map(|(f, _)| {
                         (
                             pos,
                             f.name.clone(),
@@ -396,7 +397,8 @@ impl<
                                 .map(|f| f.path().to_owned())
                                 .unwrap_or_default(),
                         )
-                    });
+                    })));
+                    // state.highlighted_popup = highlighted.map(|(f, _)| ());
                     state.highlighted = highlighted.map_or(usize::MAX, |(f, _)| f.idx);
                 }
                 cosmic::iced::mouse::Event::ButtonPressed(Button::Left) => {
@@ -453,128 +455,9 @@ impl<
             renderer.fill_quad(r, Background::Color(Color::TRANSPARENT));
         }
     }
-
-    fn overlay<'b>(
-        &mut self,
-        _state: &mut cosmic::iced_core::widget::Tree,
-        _layout: Layout<'_>,
-        _renderer: &Renderer,
-    ) -> Option<cosmic::iced_core::overlay::Element<Message, Theme, Renderer>> {
-        let state: &mut State = _state.state.downcast_mut();
-
-        state.highlighted_popup.clone().map(|f| {
-            cosmic::iced_core::overlay::Element::new(
-                f.0,
-                Box::new(Overlay {
-                    name: f.1,
-                    size: f.2,
-                    path: f.3,
-                    text_size: self.text_size,
-                }),
-            )
-        })
-    }
 }
 impl<'a, Message: 'static> From<PartitionView<'a, Message>> for cosmic::Element<'a, Message> {
     fn from(value: PartitionView<'a, Message>) -> Self {
         Self::new(value)
-    }
-}
-
-struct Overlay {
-    // pos: Point,
-    name: String,
-    size: u64,
-    path: PathBuf,
-    text_size: f32,
-}
-impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer>
-    cosmic::iced_core::Overlay<Message, Theme, Renderer> for Overlay
-{
-    fn layout(
-        &mut self,
-        _renderer: &Renderer,
-        bounds: Size,
-        position: Point,
-        _translation: Vector,
-    ) -> layout::Node {
-        let pos = position + Vector::new(400.0, 0.0);
-        layout::Node::new(Size::new(-pos.x, pos.y).expand(bounds)).move_to(pos)
-    }
-
-    fn draw(
-        &self,
-        renderer: &mut Renderer,
-        _theme: &Theme,
-        _style: &cosmic::iced_core::renderer::Style,
-        layout: Layout<'_>,
-        _cursor: cosmic::iced_core::mouse::Cursor,
-    ) {
-        let bounds = Rectangle::new(
-            layout.position()
-                - Vector::new(
-                    if layout.bounds().size().width > 0.0 || layout.position().x - 400.0 < 400.0 {
-                        400.0
-                    } else {
-                        800.0
-                    },
-                    self.text_size * 3.0 * 1.4,
-                ),
-            Size::new(400.0, self.text_size * 3.0 * 1.4),
-        );
-
-        renderer.fill_quad(
-            cosmic::iced_core::renderer::Quad {
-                bounds,
-                border: Border::with_radius(2),
-                shadow: Shadow {
-                    color: Color::BLACK,
-                    offset: Vector::new(4.0, 4.0),
-                    blur_radius: 6.0,
-                },
-                // shadow: Default::default(),
-            },
-            Background::Color(Color::BLACK.blend_alpha(Color::WHITE, 0.75)),
-        );
-
-        let string = format!(
-            "{}\n{}\n{}",
-            self.name,
-            humansize::format_size(self.size, humansize::DECIMAL),
-            self.path.display()
-        );
-
-        // renderer.fill_text(
-        //     cosmic::iced_core::text::Text {
-        //         content: &string,
-        //         bounds: bounds.size(),
-        //         size: self.text_size.into(),
-        //         font: renderer.default_font(),
-        //         horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
-        //         vertical_alignment: cosmic::iced::alignment::Vertical::Top,
-        //         line_height: text::LineHeight::default(),
-        //         shaping: text::Shaping::Advanced,
-        //         wrap: text::Wrap::WordOrGlyph,
-        //     },
-        //     Point::new(bounds.x + 1.0, bounds.y + 1.0 /* + text_size / 2.0*/),
-        //     Color::BLACK,
-        //     bounds,
-        // );
-        renderer.fill_text(
-            cosmic::iced_core::text::Text {
-                content: &string,
-                bounds: bounds.size(),
-                size: self.text_size.into(),
-                font: renderer.default_font(),
-                horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
-                vertical_alignment: cosmic::iced::alignment::Vertical::Top,
-                line_height: text::LineHeight::default(),
-                shaping: text::Shaping::Advanced,
-                wrap: text::Wrap::WordOrGlyph,
-            },
-            Point::new(bounds.x, bounds.y /* + text_size / 2.0*/),
-            Color::WHITE.blend_alpha(Color::BLACK, 0.8),
-            bounds,
-        );
     }
 }
