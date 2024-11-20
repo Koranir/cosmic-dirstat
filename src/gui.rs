@@ -49,7 +49,7 @@ impl App {
         let heading = text::heading("Legend");
 
         let mut grid = grid();
-        for (name, col) in self.extensions_ordered.iter() {
+        for (name, col) in &self.extensions_ordered {
             let name = name.to_string_lossy().into_owned();
             let col = *col;
             let name = text(name);

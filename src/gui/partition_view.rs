@@ -208,11 +208,10 @@ impl<'a, Msg> PartitionView<'a, Msg> {
     }
 }
 impl<
-        'a,
         Message,
         Theme,
         Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer,
-    > Widget<Message, Theme, Renderer> for PartitionView<'a, Message>
+    > Widget<Message, Theme, Renderer> for PartitionView<'_, Message>
 {
     fn state(&self) -> cosmic::iced_core::widget::tree::State {
         cosmic::iced_core::widget::tree::State::Some(Box::new(State {
@@ -311,7 +310,7 @@ impl<
                             analyzed_item: item.item.cloned(),
                             placement: item.placement,
                             size: item.size,
-                            extension: ext.map(|f| f.to_os_string()),
+                            extension: ext.map(std::ffi::OsStr::to_os_string),
                         }
                     })
                     .collect()
