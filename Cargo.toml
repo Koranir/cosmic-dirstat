@@ -9,10 +9,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 humansize = "2.1.3"
-rfd = { version = "0.14.1", default-features = false, features = [
-    "tokio",
-    "xdg-portal",
-] }
+rfd = "0.17.2"
 treemap = "0.3.2"
 
 [dependencies.libcosmic]
