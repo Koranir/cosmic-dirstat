@@ -269,7 +269,7 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                     .into_iter()
                     .map(|mut item| {
                         let mut bounds_ = *item.bounds();
-                        bounds_.y += text_offset * 1.4;
+                        bounds_.y = text_offset.mul_add(1.4, bounds_.y);
                         item.set_bounds(bounds_);
                         // dbg!(opt_dir);
                         let d = match item.item {
@@ -406,17 +406,13 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                     if let Some((f, parent)) = highlighted {
                         shell.publish((self.on_click)(
                             f.analyzed_item
-                                .as_ref()
-                                .map(|f| f.path().to_owned())
-                                .unwrap_or_else(|| {
-                                    parent
-                                        .map(|f| {
+                                .as_ref().map_or_else(|| {
+                                    parent.map_or_else(|| {
+                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
+                                        }, |f| {
                                             f.analyzed_item.as_ref().unwrap().path().to_owned()
                                         })
-                                        .unwrap_or_else(|| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        })
-                                }),
+                                }, |f| f.path().to_owned()),
                         ));
                     }
                 }

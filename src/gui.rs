@@ -43,7 +43,7 @@ struct App {
     highlighted: Option<(Point, String, u64, PathBuf)>,
 }
 impl App {
-    pub fn tree_view(&self) -> cosmic::Element<Msg> {
+    pub fn tree_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{column, text};
 
         let heading = text::heading("Legend");
@@ -74,7 +74,7 @@ impl App {
             .into()
     }
 
-    pub fn partition_view(&self) -> cosmic::Element<Msg> {
+    pub fn partition_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{button, column, container, icon, row, text};
 
         let heading_text = text::heading(format!(
@@ -129,7 +129,7 @@ impl App {
             .into()
     }
 
-    pub fn path_and_title(&self) -> cosmic::Element<Msg> {
+    pub fn path_and_title(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{button, column, container, icon, row, text, text_input};
 
         let title = text::title1("COSMIC DirStat");
@@ -145,10 +145,10 @@ impl App {
 
         let path_input = text_input("path/to/analyzed/dir", self.crawl_path.to_string_lossy())
             .on_input(|f| Msg::CrawlPathChanged(PathBuf::from(f)));
-        let submit_button = button::standard(if !self.crawling_path {
-            "Scan"
-        } else {
+        let submit_button = button::standard(if self.crawling_path {
             "Cancel"
+        } else {
+            "Scan"
         })
         .on_press(Msg::CrawlPath {
             cancel: self.crawling_path,
@@ -263,10 +263,7 @@ impl cosmic::Application for App {
             Msg::CrawlPathDialogue => {
                 return cosmic::Task::perform(
                     rfd::AsyncFileDialog::new().pick_folder(),
-                    |f| match f {
-                        Some(f) => Some(Msg::CrawlPathChanged(f.path().to_path_buf()).into()),
-                        None => None,
-                    },
+                    |f| f.map(|f| Msg::CrawlPathChanged(f.path().to_path_buf()).into()),
                 )
                 .and_then(cosmic::app::Task::done);
             }
@@ -290,7 +287,7 @@ impl cosmic::Application for App {
         cosmic::Task::none()
     }
 
-    fn dialog(&self) -> Option<cosmic::Element<Self::Message>> {
+    fn dialog(&self) -> Option<cosmic::Element<'_, Self::Message>> {
         self.error.as_ref().map(|e| {
             cosmic::widget::dialog()
                 .title(format!("Error: {e}"))
@@ -299,7 +296,7 @@ impl cosmic::Application for App {
         })
     }
 
-    fn view(&self) -> cosmic::Element<Self::Message> {
+    fn view(&self) -> cosmic::Element<'_, Self::Message> {
         use cosmic::widget::container;
 
         let grid =
