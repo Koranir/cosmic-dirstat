@@ -25,7 +25,7 @@ enum Msg {
     Analyzed(Arc<crate::analyze::AnalyzedDir>),
     AnalyzedError(String),
     ClearError,
-    NewItemHighlighted(Option<(Point, String, u64, PathBuf)>),
+    NewItemHighlighted(Option<(Point, String, u64, PathBuf, u64)>),
     Tree(cosmic_files::tab::Message),
     ModifiersChanged(cosmic::iced::keyboard::Modifiers),
     NewItems(Vec<cosmic_files::tab::Item>),
@@ -50,7 +50,7 @@ struct App {
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
-    highlighted: Option<(Point, String, u64, PathBuf)>,
+    highlighted: Option<(Point, String, u64, PathBuf, u64)>,
     focus_next_frame: bool,
 }
 impl App {
@@ -124,9 +124,14 @@ impl App {
                 match self.highlighted.as_ref() {
                     Some(s) => cosmic::widget::column()
                         .push(cosmic::widget::text(s.1.as_str()))
-                        .push(cosmic::widget::text(humansize::format_size(
-                            s.2,
-                            humansize::DECIMAL,
+                        .push(cosmic::widget::text(format!(
+                            "{}{}",
+                            humansize::format_size(s.2, humansize::DECIMAL,),
+                            if s.4 > 1 {
+                                format!(" (x{} copies)", s.4)
+                            } else {
+                                format!("")
+                            }
                         )))
                         .push(cosmic::widget::text(s.3.to_string_lossy()))
                         .into(),
