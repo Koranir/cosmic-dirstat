@@ -138,7 +138,7 @@ impl App {
             )
             .class(cosmic::theme::Container::Card)
             .into(),
-            None => text("No Directory Analyzed").into(),
+            None => text("No Directory Analyzed, press 'Scan' to start.").into(),
         };
 
         column::with_children(vec![heading.into(), d])
@@ -229,7 +229,7 @@ impl cosmic::Application for App {
                 Panels::NamePath,
             )
             .unwrap();
-        state.resize(name_path_tree_split, 0.4);
+        state.resize(name_path_tree_split, 0.66);
 
         core.set_header_title("COSMIC DirStat".into());
 
@@ -476,7 +476,11 @@ impl cosmic::Application for App {
                 _ => None,
             }),
             self.tree.subscription(true).map(Msg::Tree),
-            cosmic::iced::window::frames().map(|_| Msg::Frame),
+            if self.focus_next_frame {
+                cosmic::iced::window::frames().map(|_| Msg::Frame)
+            } else {
+                cosmic::iced::Subscription::none()
+            },
         ])
     }
 }
