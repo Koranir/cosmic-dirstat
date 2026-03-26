@@ -161,7 +161,7 @@ impl treemap::Mappable for PartitionElement<'_> {
     }
 }
 
-pub fn partition(space: (f64, f64), min: f64, dir: &AnalyzedDir) -> Vec<PartitionElement> {
+pub fn partition(space: (f64, f64), min: f64, dir: &AnalyzedDir) -> Vec<PartitionElement<'_>> {
     let scale = dir.size as f64 / (space.0 * space.1);
     let min_area = (min * scale) as u64;
     let end_index = dir

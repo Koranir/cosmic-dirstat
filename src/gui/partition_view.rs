@@ -77,6 +77,7 @@ impl StateBox {
                 bounds: quad_bounds,
                 border: Border::default(),
                 shadow: Default::default(),
+                snap: true,
             },
             Background::Gradient(cosmic::iced::Gradient::Linear(
                 cosmic::iced::gradient::Linear::new(std::f32::consts::PI / 4.0)
@@ -120,11 +121,14 @@ impl StateBox {
                         bounds,
                         size: text_size.into(),
                         font: renderer.default_font(),
-                        horizontal_alignment: cosmic::iced::alignment::Horizontal::Left,
-                        vertical_alignment: cosmic::iced::alignment::Vertical::Top,
+                        align_x: cosmic::iced_core::text::Alignment::Default,
+                        align_y: cosmic::iced::alignment::Vertical::Top,
                         line_height: text::LineHeight::default(),
                         shaping: text::Shaping::Advanced,
                         wrapping: text::Wrapping::WordOrGlyph,
+                        ellipsize: cosmic::iced_core::text::Ellipsize::Middle(
+                            cosmic::iced_core::text::EllipsizeHeightLimit::Lines(1),
+                        ),
                     },
                     Point::new(quad_bounds.x, quad_bounds.y /* + text_size / 2.0*/),
                     Color::WHITE.blend_alpha(Color::BLACK, 0.8),
@@ -159,6 +163,7 @@ impl StateBox {
                     offset: Vector::new(0.0, 0.0),
                     blur_radius: 6.0,
                 },
+                snap: true,
             });
         }
 
@@ -207,11 +212,8 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         }
     }
 }
-impl<
-        Message,
-        Theme,
-        Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer,
-    > Widget<Message, Theme, Renderer> for PartitionView<'_, Message>
+impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer>
+    Widget<Message, Theme, Renderer> for PartitionView<'_, Message>
 {
     fn state(&self) -> cosmic::iced_core::widget::tree::State {
         cosmic::iced_core::widget::tree::State::Some(Box::new(State {
@@ -234,7 +236,7 @@ impl<
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut cosmic::iced_core::widget::Tree,
         _renderer: &Renderer,
         limits: &cosmic::iced_core::layout::Limits,
@@ -267,7 +269,7 @@ impl<
                     .into_iter()
                     .map(|mut item| {
                         let mut bounds_ = *item.bounds();
-                        bounds_.y += text_offset * 1.4;
+                        bounds_.y = text_offset.mul_add(1.4, bounds_.y);
                         item.set_bounds(bounds_);
                         // dbg!(opt_dir);
                         let d = match item.item {
@@ -360,17 +362,17 @@ impl<
         layout
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         state: &mut cosmic::iced_core::widget::Tree,
-        event: cosmic::iced::Event,
+        event: &cosmic::iced::Event,
         layout: Layout<'_>,
         cursor: cosmic::iced_core::mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn cosmic::iced_core::Clipboard,
         shell: &mut cosmic::iced_core::Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> cosmic::iced_core::event::Status {
+    ) {
         let state: &mut State = state.state.downcast_mut();
 
         if state.should_broadcast_ordered {
@@ -404,25 +406,19 @@ impl<
                     if let Some((f, parent)) = highlighted {
                         shell.publish((self.on_click)(
                             f.analyzed_item
-                                .as_ref()
-                                .map(|f| f.path().to_owned())
-                                .unwrap_or_else(|| {
-                                    parent
-                                        .map(|f| {
+                                .as_ref().map_or_else(|| {
+                                    parent.map_or_else(|| {
+                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
+                                        }, |f| {
                                             f.analyzed_item.as_ref().unwrap().path().to_owned()
                                         })
-                                        .unwrap_or_else(|| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        })
-                                }),
+                                }, |f| f.path().to_owned()),
                         ));
                     }
                 }
                 _ => {}
             }
         }
-
-        cosmic::iced_core::event::Status::Ignored
     }
 
     fn draw(
