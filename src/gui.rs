@@ -53,7 +53,7 @@ impl App {
             let name = name.to_string_lossy().into_owned();
             let col = *col;
             let name = text(name);
-            let col = container(widget::Space::new(10.0, 10.0)).class(
+            let col = container(widget::Space::new().width(10.0).height(10.0)).class(
                 cosmic::theme::Container::custom(move |theme| {
                     container::Style {
                         background: Some(col.into()),
@@ -113,9 +113,9 @@ impl App {
                         )))
                         .push(cosmic::widget::text(s.3.to_string_lossy()))
                         .into(),
-                    None => cosmic::iced::Element::new(cosmic::widget::Space::with_width(
-                        cosmic::iced::Length::Shrink,
-                    )),
+                    None => cosmic::iced::Element::new(
+                        cosmic::widget::Space::new().width(cosmic::iced::Length::Shrink),
+                    ),
                 },
                 widget::tooltip::Position::FollowCursor,
             )
@@ -264,10 +264,11 @@ impl cosmic::Application for App {
                 return cosmic::Task::perform(
                     rfd::AsyncFileDialog::new().pick_folder(),
                     |f| match f {
-                        Some(f) => Msg::CrawlPathChanged(f.path().to_path_buf()).into(),
-                        None => cosmic::app::Message::None,
+                        Some(f) => Some(Msg::CrawlPathChanged(f.path().to_path_buf()).into()),
+                        None => None,
                     },
-                );
+                )
+                .and_then(cosmic::app::Task::done);
             }
             Msg::PaneResize(f) => self.state.resize(f.split, f.ratio),
             Msg::Analyzed(a) => {
