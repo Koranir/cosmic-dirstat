@@ -1,9 +1,10 @@
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc};
 
 mod partition_view;
 
 use cosmic::{
-    iced::{alignment::Horizontal, Color, Length, Point},
+    app::Task,
+    iced::{Color, Length, Point, alignment::Horizontal},
     iced_widget::scrollable,
     widget::{self, container, grid},
 };
@@ -14,6 +15,7 @@ pub fn run() {
 
 #[derive(Debug, Clone)]
 enum Msg {
+    ItemClicked(PathBuf),
     CrawlPathChanged(PathBuf),
     CrawlPath { cancel: bool },
     CrawlPathDialogue,
@@ -24,6 +26,11 @@ enum Msg {
     AnalyzedError(String),
     ClearError,
     NewItemHighlighted(Option<(Point, String, u64, PathBuf)>),
+    Tree(cosmic_files::tab::Message),
+    ModifiersChanged(cosmic::iced::keyboard::Modifiers),
+    NewItems(Vec<cosmic_files::tab::Item>),
+    TreeSelect(PathBuf),
+    Frame,
 }
 
 enum Panels {
@@ -37,13 +44,17 @@ struct App {
     crawl_path: PathBuf,
     crawling_path: bool,
     state: cosmic::widget::pane_grid::State<Panels>,
+    tree: cosmic_files::tab::Tab,
+    tree_binds: HashMap<cosmic::widget::menu::KeyBind, cosmic_files::app::Action>,
+    modifiers: cosmic::iced::keyboard::Modifiers,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
     highlighted: Option<(Point, String, u64, PathBuf)>,
+    focus_next_frame: bool,
 }
 impl App {
-    pub fn tree_view(&self) -> cosmic::Element<'_, Msg> {
+    pub fn legend_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{column, text};
 
         let heading = text::heading("Legend");
@@ -74,6 +85,12 @@ impl App {
             .into()
     }
 
+    pub fn tree_view(&self) -> cosmic::Element<'_, Msg> {
+        self.tree
+            .view(&self.tree_binds, &self.modifiers, false)
+            .map(Msg::Tree)
+    }
+
     pub fn partition_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{button, column, container, icon, row, text};
 
@@ -100,7 +117,7 @@ impl App {
                     d,
                     8.0,
                     8.0 * 8.0,
-                    Msg::Crawl,
+                    Msg::ItemClicked,
                     Msg::ExtensionLegendChanged,
                     Msg::NewItemHighlighted,
                 ),
@@ -145,14 +162,10 @@ impl App {
 
         let path_input = text_input("path/to/analyzed/dir", self.crawl_path.to_string_lossy())
             .on_input(|f| Msg::CrawlPathChanged(PathBuf::from(f)));
-        let submit_button = button::standard(if self.crawling_path {
-            "Cancel"
-        } else {
-            "Scan"
-        })
-        .on_press(Msg::CrawlPath {
-            cancel: self.crawling_path,
-        });
+        let submit_button = button::standard(if self.crawling_path { "Cancel" } else { "Scan" })
+            .on_press(Msg::CrawlPath {
+                cancel: self.crawling_path,
+            });
 
         let open_folder = button::icon(icon::from_name("folder-open-symbolic").handle())
             .on_press(Msg::CrawlPathDialogue);
@@ -167,6 +180,15 @@ impl App {
         column::with_children(vec![title_box.into(), input_box.into()])
             .padding(10.0)
             .into()
+    }
+
+    pub fn rescan(&mut self) -> Task<Msg> {
+        let loc = self.tree.location.clone();
+
+        cosmic::Task::perform(
+            async move { loc.scan(cosmic_files::config::IconSizes::default()) },
+            |(_, items)| cosmic::Action::App(Msg::NewItems(items)),
+        )
     }
 }
 
@@ -211,28 +233,110 @@ impl cosmic::Application for App {
 
         core.set_header_title("COSMIC DirStat".into());
 
-        let app = Self {
+        let files_config = cosmic_files::config::Config::load().1;
+
+        pub fn tree_key_binds() -> HashMap<widget::menu::KeyBind, cosmic_files::app::Action> {
+            use cosmic::iced::keyboard::{Key, key::Named};
+            use cosmic_files::app::Action;
+            use widget::menu::{KeyBind, key_bind::Modifier};
+
+            let mut key_binds = HashMap::new();
+
+            macro_rules! bind {
+                ([$($modifier:ident),* $(,)?], $key:expr, $action:ident) => {{
+                    key_binds.insert(
+                        KeyBind {
+                            modifiers: vec![$(Modifier::$modifier),*],
+                            key: $key,
+                        },
+                        Action::$action,
+                    );
+                }};
+            }
+
+            // Common keys
+            bind!([], Key::Named(Named::ArrowDown), ItemDown);
+            bind!([], Key::Named(Named::ArrowLeft), ItemLeft);
+            bind!([], Key::Named(Named::ArrowRight), ItemRight);
+            bind!([], Key::Named(Named::ArrowUp), ItemUp);
+            bind!([], Key::Named(Named::F5), Reload);
+            bind!([], Key::Named(Named::Home), SelectFirst);
+            bind!([], Key::Named(Named::End), SelectLast);
+            bind!([Shift], Key::Named(Named::ArrowDown), ItemDown);
+            bind!([Shift], Key::Named(Named::ArrowLeft), ItemLeft);
+            bind!([Shift], Key::Named(Named::ArrowRight), ItemRight);
+            bind!([Shift], Key::Named(Named::ArrowUp), ItemUp);
+            bind!([Shift], Key::Named(Named::Home), SelectFirst);
+            bind!([Shift], Key::Named(Named::End), SelectLast);
+            bind!([Ctrl, Shift], Key::Character("n".into()), NewFolder);
+            bind!([], Key::Named(Named::Enter), Open);
+            bind!([Ctrl], Key::Character(" ".into()), Preview);
+            bind!([], Key::Character(" ".into()), Gallery);
+
+            bind!([Ctrl], Key::Character("h".into()), ToggleShowHidden);
+            bind!([Ctrl], Key::Character("a".into()), SelectAll);
+            bind!([Ctrl], Key::Character("=".into()), ZoomIn);
+            bind!([Ctrl], Key::Character("+".into()), ZoomIn);
+            bind!([Ctrl], Key::Character("0".into()), ZoomDefault);
+            bind!([Ctrl], Key::Character("-".into()), ZoomOut);
+            // Switch view
+            bind!([Ctrl], Key::Character("1".into()), TabViewList);
+            bind!([Ctrl], Key::Character("2".into()), TabViewGrid);
+
+            key_binds
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_default();
+
+        let mut app = Self {
             core,
-            crawl_path: PathBuf::new(),
+            crawl_path: cwd.clone(),
             crawling_path: false,
             state,
             analyzed: None,
             error: None,
             extensions_ordered: Vec::new(),
             highlighted: None,
+            tree: cosmic_files::tab::Tab::new(
+                cosmic_files::tab::Location::Path(cwd),
+                files_config.tab,
+                files_config.thumb_cfg,
+                None,
+                cosmic::iced::widget::Id::unique(),
+                None,
+            ),
+            tree_binds: tree_key_binds(),
+            modifiers: cosmic::iced::keyboard::Modifiers::empty(),
+            focus_next_frame: false,
         };
 
-        (app, cosmic::Task::none())
+        let task = app.rescan();
+
+        (app, task)
     }
 
     fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
         match message {
+            Msg::ItemClicked(s) => {
+                if s.is_dir() {
+                    return self.update(Msg::CrawlPathChanged(s));
+                } else {
+                    if let Some(parent) = s.parent() {
+                        return self
+                            .update(Msg::CrawlPathChanged(parent.into()))
+                            .chain(Task::done(cosmic::Action::App(Msg::TreeSelect(s))));
+                    }
+                }
+            }
             Msg::CrawlPathChanged(s) => {
-                self.crawl_path = s;
-                self.core.set_header_title(format!(
-                    "COSMIC DirStat - {}",
-                    self.crawl_path.to_string_lossy().into_owned()
-                ));
+                if s == self.crawl_path {
+                    return Task::none();
+                }
+
+                self.crawl_path = s.clone();
+                self.tree
+                    .change_location(&cosmic_files::tab::Location::Path(s), None);
+                return self.rescan();
             }
             Msg::Crawl(s) => {
                 self.crawl_path = s.clone();
@@ -261,10 +365,9 @@ impl cosmic::Application for App {
                 self.crawling_path = false;
             }
             Msg::CrawlPathDialogue => {
-                return cosmic::Task::perform(
-                    rfd::AsyncFileDialog::new().pick_folder(),
-                    |f| f.map(|f| Msg::CrawlPathChanged(f.path().to_path_buf()).into()),
-                )
+                return cosmic::Task::perform(rfd::AsyncFileDialog::new().pick_folder(), |f| {
+                    f.map(|f| Msg::CrawlPathChanged(f.path().to_path_buf()).into())
+                })
                 .and_then(cosmic::app::Task::done);
             }
             Msg::PaneResize(f) => self.state.resize(f.split, f.ratio),
@@ -282,6 +385,45 @@ impl cosmic::Application for App {
                 Some(s) => self.highlighted = Some(s),
                 None => self.highlighted = None,
             },
+            Msg::Tree(message) => {
+                let commands = self.tree.update(message, self.modifiers);
+
+                return Task::batch(commands.into_iter().filter_map(|c| match c {
+                    cosmic_files::tab::Command::Iced(task) => {
+                        Some(task.0.map(|t| cosmic::Action::App(Msg::Tree(t))))
+                    }
+                    // cosmic_files::tab::Command::Action(action) => {
+                    //     self.tree.update(action.message(), self.modifiers);
+                    // }
+                    cosmic_files::tab::Command::ChangeLocation(_, loc, _) => {
+                        loc.path_opt().map(|p| {
+                            self.crawl_path.clone_from(p);
+                        });
+                        // dbg!(loc);
+                        Some(self.rescan())
+                    }
+                    cosmic_files::tab::Command::OpenFile(files) => {
+                        for f in files {
+                            open::that_detached(f).unwrap();
+                        }
+                        None
+                    }
+                    _ => None,
+                }));
+            }
+            Msg::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            Msg::NewItems(items) => self.tree.set_items(items),
+            Msg::TreeSelect(s) => {
+                self.tree.select_paths([s].into());
+                self.focus_next_frame = true;
+            }
+            Msg::Frame => {
+                if self.focus_next_frame {
+                    self.focus_next_frame = false;
+
+                    return self.update(Msg::Tree(cosmic_files::tab::Message::ScrollToFocused));
+                }
+            }
         }
 
         cosmic::Task::none()
@@ -323,5 +465,18 @@ impl cosmic::Application for App {
             .spacing(10.0);
 
         grid.into()
+    }
+
+    fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
+        cosmic::iced::Subscription::batch([
+            cosmic::iced::keyboard::listen().filter_map(|k| match k {
+                cosmic::iced::keyboard::Event::ModifiersChanged(modifiers) => {
+                    Some(Msg::ModifiersChanged(modifiers))
+                }
+                _ => None,
+            }),
+            self.tree.subscription(true).map(Msg::Tree),
+            cosmic::iced::window::frames().map(|_| Msg::Frame),
+        ])
     }
 }
