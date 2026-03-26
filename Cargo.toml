@@ -4,7 +4,7 @@ authors = ["Daniel Yoon <daniel@yoon.com.au>"]
 description = "WIP - KDirStat-esque disk usage analyzer using the libcosmic toolkit"
 repository = "https://github.com/Koranir/cosmic-dirstat"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
