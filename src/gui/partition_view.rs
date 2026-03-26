@@ -3,9 +3,9 @@ use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::atomic::Atom
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
     iced::{
-        mouse::Button, Background, Border, Color, Length, Point, Radius, Rectangle, Size, Vector,
+        Background, Border, Color, Length, Point, Radius, Rectangle, Size, Vector, mouse::Button,
     },
-    iced_core::{layout, text, Layout, Renderer, Shadow},
+    iced_core::{Layout, Renderer, Shadow, layout, text},
     prelude::ColorExt,
     widget::Widget,
 };
@@ -190,7 +190,7 @@ pub struct PartitionView<'a, Msg> {
     minimum_area: f32,
     on_click: Box<dyn FnMut(PathBuf) -> Msg>,
     on_colors: Box<dyn FnMut(Vec<(OsString, Color)>) -> Msg>,
-    on_item_hovered: Box<dyn FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg>, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+    on_item_hovered: Box<dyn FnMut(Option<(Point, String, u64, PathBuf, u64)>) -> Msg>, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
 }
 impl<'a, Msg> PartitionView<'a, Msg> {
     pub fn new(
@@ -199,7 +199,7 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         minimum_area: f32,
         on_click: impl FnMut(PathBuf) -> Msg + 'static,
         on_colors: impl FnMut(Vec<(OsString, Color)>) -> Msg + 'static,
-        on_item_hovered: impl FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg + 'static, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+        on_item_hovered: impl FnMut(Option<(Point, String, u64, PathBuf, u64)>) -> Msg + 'static, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
     ) -> Self {
         Self {
             items,
@@ -397,6 +397,10 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                                 .as_ref()
                                 .map(|f| f.path().to_owned())
                                 .unwrap_or_default(),
+                            f.analyzed_item
+                                .as_ref()
+                                .map(|f| f.hardlinks())
+                                .unwrap_or_default(),
                         )
                     })));
                     // state.highlighted_popup = highlighted.map(|(f, _)| ());
@@ -404,16 +408,15 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                 }
                 cosmic::iced::mouse::Event::ButtonPressed(Button::Left) => {
                     if let Some((f, parent)) = highlighted {
-                        shell.publish((self.on_click)(
-                            f.analyzed_item
-                                .as_ref().map_or_else(|| {
-                                    parent.map_or_else(|| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        }, |f| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        })
-                                }, |f| f.path().to_owned()),
-                        ));
+                        shell.publish((self.on_click)(f.analyzed_item.as_ref().map_or_else(
+                            || {
+                                parent.map_or_else(
+                                    || f.analyzed_item.as_ref().unwrap().path().to_owned(),
+                                    |f| f.analyzed_item.as_ref().unwrap().path().to_owned(),
+                                )
+                            },
+                            |f| f.path().to_owned(),
+                        )));
                     }
                 }
                 _ => {}

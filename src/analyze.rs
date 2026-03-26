@@ -59,6 +59,14 @@ impl AnalyzedItem {
             Self::Symlink(s) => &s.path,
         }
     }
+
+    pub fn hardlinks(&self) -> u64 {
+        match self {
+            AnalyzedItem::Dir(_) => 0,
+            AnalyzedItem::File(analyzed_file) => analyzed_file.hardlink_count,
+            AnalyzedItem::Symlink(analyzed_symlink) => analyzed_symlink.hardlink_count,
+        }
+    }
 }
 
 pub fn analyze_dir(dir: &Path, _ctx: &Context) -> std::io::Result<AnalyzedDir> {
