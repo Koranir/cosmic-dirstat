@@ -54,6 +54,7 @@ struct App {
     focus_next_frame: bool,
 }
 impl App {
+    #[allow(dead_code)]
     pub fn legend_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{column, text};
 
