@@ -3,9 +3,15 @@ use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::atomic::Atom
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
     iced::{
-        mouse::Button, Background, Border, Color, Length, Point, Radius, Rectangle, Size, Vector,
+        Background, Border, Color, Length, Limits, Point, Radius, Rectangle, Shadow, Size, Vector,
+        advanced::{self, Layout, Renderer, layout, renderer::Quad, text},
+        core::{
+            Clipboard, Shell,
+            layout::Node,
+            widget::{Tree, tree},
+        },
+        mouse::{Button, Cursor},
     },
-    iced_core::{layout, text, Layout, Renderer, Shadow},
     prelude::ColorExt,
     widget::Widget,
 };
@@ -50,7 +56,7 @@ impl StateBox {
         }
     }
 
-    pub fn draw<R: Renderer + cosmic::iced_core::text::Renderer>(
+    pub fn draw<R: Renderer + text::Renderer>(
         &self,
         at: (f32, f32),
         renderer: &mut R,
@@ -58,7 +64,7 @@ impl StateBox {
         to_highlight: usize,
         text_size: f32,
         colors: &HashMap<OsString, Color>,
-    ) -> Option<cosmic::iced_core::renderer::Quad> {
+    ) -> Option<Quad> {
         let bounds = self.placement;
 
         let quad_bounds = Rectangle::new(
@@ -73,7 +79,7 @@ impl StateBox {
             .unwrap_or(Color::from_rgb8(100, 100, 100));
 
         renderer.fill_quad(
-            cosmic::iced_core::renderer::Quad {
+            Quad {
                 bounds: quad_bounds,
                 border: Border::default(),
                 shadow: Default::default(),
@@ -116,19 +122,17 @@ impl StateBox {
                     humansize::format_size(self.size, humansize::FormatSizeOptions::default())
                 );
                 renderer.fill_text(
-                    cosmic::iced_core::Text {
+                    advanced::Text {
                         content: f,
                         bounds,
                         size: text_size.into(),
                         font: renderer.default_font(),
-                        align_x: cosmic::iced_core::text::Alignment::Default,
+                        align_x: text::Alignment::Default,
                         align_y: cosmic::iced::alignment::Vertical::Top,
                         line_height: text::LineHeight::default(),
                         shaping: text::Shaping::Advanced,
                         wrapping: text::Wrapping::WordOrGlyph,
-                        ellipsize: cosmic::iced_core::text::Ellipsize::Middle(
-                            cosmic::iced_core::text::EllipsizeHeightLimit::Lines(1),
-                        ),
+                        ellipsize: text::Ellipsize::Middle(text::EllipsizeHeightLimit::Lines(1)),
                     },
                     Point::new(quad_bounds.x, quad_bounds.y /* + text_size / 2.0*/),
                     Color::WHITE.blend_alpha(Color::BLACK, 0.8),
@@ -151,7 +155,7 @@ impl StateBox {
         }
 
         if self.idx == to_highlight {
-            maybe_highlight = Some(cosmic::iced_core::renderer::Quad {
+            maybe_highlight = Some(Quad {
                 bounds: quad_bounds,
                 border: Border {
                     color: Color::WHITE,
@@ -212,11 +216,11 @@ impl<'a, Msg> PartitionView<'a, Msg> {
         }
     }
 }
-impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer>
-    Widget<Message, Theme, Renderer> for PartitionView<'_, Message>
+impl<Message, Theme, Renderer: advanced::Renderer + text::Renderer> Widget<Message, Theme, Renderer>
+    for PartitionView<'_, Message>
 {
-    fn state(&self) -> cosmic::iced_core::widget::tree::State {
-        cosmic::iced_core::widget::tree::State::Some(Box::new(State {
+    fn state(&self) -> tree::State {
+        tree::State::Some(Box::new(State {
             boxes: vec![],
             highlighted: usize::MAX,
             // highlighted_popup: None,
@@ -235,12 +239,7 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut cosmic::iced_core::widget::Tree,
-        _renderer: &Renderer,
-        limits: &cosmic::iced_core::layout::Limits,
-    ) -> cosmic::iced_core::layout::Node {
+    fn layout(&mut self, tree: &mut Tree, _renderer: &Renderer, limits: &Limits) -> Node {
         let layout = layout::atomic(limits, Length::Fill, Length::Fill);
 
         let state: &mut State = tree.state.downcast_mut();
@@ -364,13 +363,13 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
 
     fn update(
         &mut self,
-        state: &mut cosmic::iced_core::widget::Tree,
+        state: &mut Tree,
         event: &cosmic::iced::Event,
         layout: Layout<'_>,
-        cursor: cosmic::iced_core::mouse::Cursor,
+        cursor: Cursor,
         _renderer: &Renderer,
-        _clipboard: &mut dyn cosmic::iced_core::Clipboard,
-        shell: &mut cosmic::iced_core::Shell<'_, Message>,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
         let state: &mut State = state.state.downcast_mut();
@@ -404,16 +403,15 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
                 }
                 cosmic::iced::mouse::Event::ButtonPressed(Button::Left) => {
                     if let Some((f, parent)) = highlighted {
-                        shell.publish((self.on_click)(
-                            f.analyzed_item
-                                .as_ref().map_or_else(|| {
-                                    parent.map_or_else(|| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        }, |f| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        })
-                                }, |f| f.path().to_owned()),
-                        ));
+                        shell.publish((self.on_click)(f.analyzed_item.as_ref().map_or_else(
+                            || {
+                                parent.map_or_else(
+                                    || f.analyzed_item.as_ref().unwrap().path().to_owned(),
+                                    |f| f.analyzed_item.as_ref().unwrap().path().to_owned(),
+                                )
+                            },
+                            |f| f.path().to_owned(),
+                        )));
                     }
                 }
                 _ => {}
@@ -423,12 +421,12 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
 
     fn draw(
         &self,
-        tree: &cosmic::iced_core::widget::Tree,
+        tree: &Tree,
         renderer: &mut Renderer,
         _theme: &Theme,
-        _style: &cosmic::iced_core::renderer::Style,
-        layout: cosmic::iced_core::Layout<'_>,
-        _cursor: cosmic::iced_core::mouse::Cursor,
+        _style: &advanced::renderer::Style,
+        layout: Layout<'_>,
+        _cursor: Cursor,
         _viewport: &cosmic::iced::Rectangle,
     ) {
         let state: &State = tree.state.downcast_ref();

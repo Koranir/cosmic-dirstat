@@ -4,8 +4,8 @@ mod partition_view;
 
 use cosmic::{
     app::Task,
+    iced::widget::scrollable,
     iced::{Color, Length, Point, alignment::Horizontal},
-    iced_widget::scrollable,
     widget::{self, container, grid},
 };
 
@@ -88,7 +88,7 @@ impl App {
 
     pub fn tree_view(&self) -> cosmic::Element<'_, Msg> {
         self.tree
-            .view(&self.tree_binds, &self.modifiers, false)
+            .view(&self.tree_binds, &self.modifiers, false, &[])
             .map(Msg::Tree)
     }
 
@@ -123,14 +123,13 @@ impl App {
                     Msg::NewItemHighlighted,
                 ),
                 match self.highlighted.as_ref() {
-                    Some(s) => cosmic::widget::column()
-                        .push(cosmic::widget::text(s.1.as_str()))
-                        .push(cosmic::widget::text(humansize::format_size(
-                            s.2,
-                            humansize::DECIMAL,
-                        )))
-                        .push(cosmic::widget::text(s.3.to_string_lossy()))
-                        .into(),
+                    Some(s) => cosmic::widget::column([
+                        cosmic::widget::text(s.1.as_str()).into(),
+                        cosmic::widget::text(humansize::format_size(s.2, humansize::DECIMAL))
+                            .into(),
+                        cosmic::widget::text(s.3.to_string_lossy()).into(),
+                    ])
+                    .into(),
                     None => cosmic::iced::Element::new(
                         cosmic::widget::Space::new().width(cosmic::iced::Length::Shrink),
                     ),
@@ -397,9 +396,9 @@ impl cosmic::Application for App {
                     //     self.tree.update(action.message(), self.modifiers);
                     // }
                     cosmic_files::tab::Command::ChangeLocation(_, loc, _) => {
-                        loc.path_opt().map(|p| {
+                        if let Some(p) = loc.path_opt() {
                             self.crawl_path.clone_from(p);
-                        });
+                        }
                         // dbg!(loc);
                         Some(self.rescan())
                     }
