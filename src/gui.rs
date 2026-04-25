@@ -1,16 +1,18 @@
-use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 mod partition_view;
+mod tree;
 
 use cosmic::{
-    app::Task,
+    Task,
+    app::Settings,
     iced::widget::scrollable,
     iced::{Color, Length, Point, alignment::Horizontal},
     widget::{self, container, grid},
 };
 
 pub fn run() {
-    cosmic::app::run::<App>(cosmic::app::Settings::default().transparent(true), ()).unwrap();
+    cosmic::app::run::<App>(Settings::default(), ()).unwrap();
 }
 
 #[derive(Debug, Clone)]
@@ -26,11 +28,7 @@ enum Msg {
     AnalyzedError(String),
     ClearError,
     NewItemHighlighted(Option<(Point, String, u64, PathBuf)>),
-    Tree(cosmic_files::tab::Message),
-    ModifiersChanged(cosmic::iced::keyboard::Modifiers),
-    NewItems(Vec<cosmic_files::tab::Item>),
-    TreeSelect(PathBuf),
-    Frame,
+    Tree(tree::Msg),
 }
 
 enum Panels {
@@ -44,14 +42,11 @@ struct App {
     crawl_path: PathBuf,
     crawling_path: bool,
     state: cosmic::widget::pane_grid::State<Panels>,
-    tree: cosmic_files::tab::Tab,
-    tree_binds: HashMap<cosmic::widget::menu::KeyBind, cosmic_files::app::Action>,
-    modifiers: cosmic::iced::keyboard::Modifiers,
+    tree: tree::FileTree,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
     highlighted: Option<(Point, String, u64, PathBuf)>,
-    focus_next_frame: bool,
 }
 impl App {
     #[allow(dead_code)]
@@ -84,12 +79,6 @@ impl App {
         column::Column::with_children(vec![heading.into(), legend.into()])
             .padding(10.0)
             .into()
-    }
-
-    pub fn tree_view(&self) -> cosmic::Element<'_, Msg> {
-        self.tree
-            .view(&self.tree_binds, &self.modifiers, false, &[])
-            .map(Msg::Tree)
     }
 
     pub fn partition_view(&self) -> cosmic::Element<'_, Msg> {
@@ -181,15 +170,6 @@ impl App {
             .padding(10.0)
             .into()
     }
-
-    pub fn rescan(&mut self) -> Task<Msg> {
-        let loc = self.tree.location.clone();
-
-        cosmic::Task::perform(
-            async move { loc.scan(cosmic_files::config::IconSizes::default()) },
-            |(_, items)| cosmic::Action::App(Msg::NewItems(items)),
-        )
-    }
 }
 
 impl cosmic::Application for App {
@@ -235,60 +215,9 @@ impl cosmic::Application for App {
 
         let files_config = cosmic_files::config::Config::load().1;
 
-        pub fn tree_key_binds() -> HashMap<widget::menu::KeyBind, cosmic_files::app::Action> {
-            use cosmic::iced::keyboard::{Key, key::Named};
-            use cosmic_files::app::Action;
-            use widget::menu::{KeyBind, key_bind::Modifier};
-
-            let mut key_binds = HashMap::new();
-
-            macro_rules! bind {
-                ([$($modifier:ident),* $(,)?], $key:expr, $action:ident) => {{
-                    key_binds.insert(
-                        KeyBind {
-                            modifiers: vec![$(Modifier::$modifier),*],
-                            key: $key,
-                        },
-                        Action::$action,
-                    );
-                }};
-            }
-
-            // Common keys
-            bind!([], Key::Named(Named::ArrowDown), ItemDown);
-            bind!([], Key::Named(Named::ArrowLeft), ItemLeft);
-            bind!([], Key::Named(Named::ArrowRight), ItemRight);
-            bind!([], Key::Named(Named::ArrowUp), ItemUp);
-            bind!([], Key::Named(Named::F5), Reload);
-            bind!([], Key::Named(Named::Home), SelectFirst);
-            bind!([], Key::Named(Named::End), SelectLast);
-            bind!([Shift], Key::Named(Named::ArrowDown), ItemDown);
-            bind!([Shift], Key::Named(Named::ArrowLeft), ItemLeft);
-            bind!([Shift], Key::Named(Named::ArrowRight), ItemRight);
-            bind!([Shift], Key::Named(Named::ArrowUp), ItemUp);
-            bind!([Shift], Key::Named(Named::Home), SelectFirst);
-            bind!([Shift], Key::Named(Named::End), SelectLast);
-            bind!([Ctrl, Shift], Key::Character("n".into()), NewFolder);
-            bind!([], Key::Named(Named::Enter), Open);
-            bind!([Ctrl], Key::Character(" ".into()), Preview);
-            bind!([], Key::Character(" ".into()), Gallery);
-
-            bind!([Ctrl], Key::Character("h".into()), ToggleShowHidden);
-            bind!([Ctrl], Key::Character("a".into()), SelectAll);
-            bind!([Ctrl], Key::Character("=".into()), ZoomIn);
-            bind!([Ctrl], Key::Character("+".into()), ZoomIn);
-            bind!([Ctrl], Key::Character("0".into()), ZoomDefault);
-            bind!([Ctrl], Key::Character("-".into()), ZoomOut);
-            // Switch view
-            bind!([Ctrl], Key::Character("1".into()), TabViewList);
-            bind!([Ctrl], Key::Character("2".into()), TabViewGrid);
-
-            key_binds
-        }
-
         let cwd = std::env::current_dir().unwrap_or_default();
 
-        let mut app = Self {
+        let app = Self {
             core,
             crawl_path: cwd.clone(),
             crawling_path: false,
@@ -297,22 +226,12 @@ impl cosmic::Application for App {
             error: None,
             extensions_ordered: Vec::new(),
             highlighted: None,
-            tree: cosmic_files::tab::Tab::new(
-                cosmic_files::tab::Location::Path(cwd),
-                files_config.tab,
-                files_config.thumb_cfg,
-                None,
-                cosmic::iced::widget::Id::unique(),
-                None,
-            ),
-            tree_binds: tree_key_binds(),
-            modifiers: cosmic::iced::keyboard::Modifiers::empty(),
-            focus_next_frame: false,
+            tree: tree::FileTree::new(cwd, files_config),
         };
 
-        let task = app.rescan();
+        let task = app.tree.rescan();
 
-        (app, task)
+        (app, task.map(Msg::Tree).map(cosmic::Action::App))
     }
 
     fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
@@ -322,9 +241,9 @@ impl cosmic::Application for App {
                     return self.update(Msg::CrawlPathChanged(s));
                 } else {
                     if let Some(parent) = s.parent() {
-                        return self
-                            .update(Msg::CrawlPathChanged(parent.into()))
-                            .chain(Task::done(cosmic::Action::App(Msg::TreeSelect(s))));
+                        return self.update(Msg::CrawlPathChanged(parent.into())).chain(
+                            Task::done(cosmic::Action::App(Msg::Tree(tree::Msg::SelectPath(s)))),
+                        );
                     }
                 }
             }
@@ -334,9 +253,8 @@ impl cosmic::Application for App {
                 }
 
                 self.crawl_path = s.clone();
-                self.tree
-                    .change_location(&cosmic_files::tab::Location::Path(s), None);
-                return self.rescan();
+                self.tree.change_location(s);
+                return self.tree.rescan().map(Msg::Tree).map(cosmic::Action::App);
             }
             Msg::Crawl(s) => {
                 self.crawl_path = s.clone();
@@ -386,43 +304,29 @@ impl cosmic::Application for App {
                 None => self.highlighted = None,
             },
             Msg::Tree(message) => {
-                let commands = self.tree.update(message, self.modifiers);
+                let commands = self.tree.update(message);
 
-                return Task::batch(commands.into_iter().filter_map(|c| match c {
-                    cosmic_files::tab::Command::Iced(task) => {
-                        Some(task.0.map(|t| cosmic::Action::App(Msg::Tree(t))))
-                    }
-                    // cosmic_files::tab::Command::Action(action) => {
-                    //     self.tree.update(action.message(), self.modifiers);
-                    // }
-                    cosmic_files::tab::Command::ChangeLocation(_, loc, _) => {
-                        if let Some(p) = loc.path_opt() {
-                            self.crawl_path.clone_from(p);
+                return Task::batch(commands.into_iter().filter_map(|c| {
+                    match c {
+                        cosmic_files::tab::Command::Iced(task) => Some(
+                            task.0
+                                .map(|t| cosmic::Action::App(Msg::Tree(tree::Msg::Tab(t)))),
+                        ),
+                        cosmic_files::tab::Command::ChangeLocation(_, loc, _) => {
+                            if let Some(p) = loc.path_opt() {
+                                self.crawl_path.clone_from(p);
+                            }
+                            Some(self.tree.rescan().map(Msg::Tree).map(cosmic::Action::App))
                         }
-                        // dbg!(loc);
-                        Some(self.rescan())
-                    }
-                    cosmic_files::tab::Command::OpenFile(files) => {
-                        for f in files {
-                            open::that_detached(f).unwrap();
+                        cosmic_files::tab::Command::OpenFile(files) => {
+                            for f in files {
+                                open::that_detached(f).unwrap();
+                            }
+                            None
                         }
-                        None
+                        _ => None,
                     }
-                    _ => None,
                 }));
-            }
-            Msg::ModifiersChanged(modifiers) => self.modifiers = modifiers,
-            Msg::NewItems(items) => self.tree.set_items(items),
-            Msg::TreeSelect(s) => {
-                self.tree.select_paths([s].into());
-                self.focus_next_frame = true;
-            }
-            Msg::Frame => {
-                if self.focus_next_frame {
-                    self.focus_next_frame = false;
-
-                    return self.update(Msg::Tree(cosmic_files::tab::Message::ScrollToFocused));
-                }
             }
         }
 
@@ -449,7 +353,7 @@ impl cosmic::Application for App {
                         .height(Length::FillPortion(2))
                         .width(Length::FillPortion(1))
                         .into(),
-                    Panels::Tree => container(self.tree_view())
+                    Panels::Tree => container(self.tree.view().map(Msg::Tree))
                         .class(cosmic::theme::Container::Card)
                         .height(Length::FillPortion(2))
                         .width(Length::FillPortion(2))
@@ -468,19 +372,6 @@ impl cosmic::Application for App {
     }
 
     fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
-        cosmic::iced::Subscription::batch([
-            cosmic::iced::keyboard::listen().filter_map(|k| match k {
-                cosmic::iced::keyboard::Event::ModifiersChanged(modifiers) => {
-                    Some(Msg::ModifiersChanged(modifiers))
-                }
-                _ => None,
-            }),
-            self.tree.subscription(true).map(Msg::Tree),
-            if self.focus_next_frame {
-                cosmic::iced::window::frames().map(|_| Msg::Frame)
-            } else {
-                cosmic::iced::Subscription::none()
-            },
-        ])
+        self.tree.subscription().map(Msg::Tree)
     }
 }
