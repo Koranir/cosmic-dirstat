@@ -18,3 +18,10 @@ treemap = "0.3.2"
 git = "https://github.com/pop-os/libcosmic"
 default-features = false
 features = ["winit", "wgpu", "tokio"]
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
