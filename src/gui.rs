@@ -1,4 +1,11 @@
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 mod partition_view;
 mod tree;
@@ -6,6 +13,7 @@ mod tree;
 use cosmic::{
     Task,
     app::Settings,
+    iced::futures::SinkExt,
     iced::widget::scrollable,
     iced::{Color, Length, Point, alignment::Horizontal},
     widget::{self, container, grid},
@@ -25,11 +33,17 @@ enum Msg {
     PartitionViewRebuildRequested(partition_view::PartitionViewRebuild),
     PartitionViewRebuilt(Arc<partition_view::PartitionViewBuild>),
     PaneResize(cosmic::widget::pane_grid::ResizeEvent),
-    Analyzed(Arc<crate::analyze::AnalyzedDir>),
-    AnalyzedError(String),
+    ScanProgress(u64, crate::analyze::ScanProgress),
+    Analyzed(u64, Arc<crate::analyze::AnalyzedDir>),
+    AnalyzedError(u64, String),
     ClearError,
     NewItemHighlighted(Option<(Point, String, u64, PathBuf)>),
     Tree(tree::Msg),
+}
+
+enum ScanEvent {
+    Progress(crate::analyze::ScanProgress),
+    Finished(Result<crate::analyze::AnalyzedDir, String>),
 }
 
 enum Panels {
@@ -45,6 +59,10 @@ struct App {
     state: cosmic::widget::pane_grid::State<Panels>,
     tree: tree::FileTree,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
+    scan_handle: Option<cosmic::iced::task::Handle>,
+    scan_cancel: Option<Arc<AtomicBool>>,
+    scan_generation: u64,
+    scan_progress: Option<crate::analyze::ScanProgress>,
     partition_view: partition_view::PartitionViewState,
     partition_rebuild_handle: Option<cosmic::iced::task::Handle>,
     error: Option<String>,
@@ -201,8 +219,37 @@ impl App {
             .spacing(5.0)
             .align_y(cosmic::iced::Alignment::Center);
 
-        let input_box =
+        let progress = self.scan_progress.as_ref().map(|progress| {
+            let label = if progress.discovered == 0 {
+                "Preparing scan...".to_string()
+            } else {
+                format!(
+                    "Scanning {:.1}% - {} of {}",
+                    progress.percentage, progress.scanned, progress.discovered
+                )
+            };
+
+            column::with_children(vec![
+                cosmic::iced::widget::progress_bar(0.0..=100.0, progress.percentage as f32)
+                    .girth(5.0)
+                    .into(),
+                text::caption(label).into(),
+                widget::scrollable::horizontal(text::caption(
+                    progress.current_path.to_string_lossy(),
+                ))
+                .scrollbar_width(0.0)
+                .scroller_width(0.0)
+                .into(),
+            ])
+            .spacing(3.0)
+        });
+
+        let mut input_box =
             column::with_children(vec![path_input.into(), submit_button.into()]).spacing(5.0);
+
+        if let Some(progress) = progress {
+            input_box = input_box.push(progress);
+        }
 
         column::with_children(vec![title_box.into(), input_box.into()])
             .padding(10.0)
@@ -261,6 +308,10 @@ impl cosmic::Application for App {
             crawling_path: false,
             state,
             analyzed: None,
+            scan_handle: None,
+            scan_cancel: None,
+            scan_generation: 0,
+            scan_progress: None,
             partition_view: partition_view::PartitionViewState::new(),
             partition_rebuild_handle: None,
             error: None,
@@ -297,30 +348,83 @@ impl cosmic::Application for App {
                 return self.tree.rescan().map(Msg::Tree).map(cosmic::Action::App);
             }
             Msg::Crawl(s) => {
+                if let Some(handle) = self.scan_handle.take() {
+                    handle.abort();
+                }
+                if let Some(cancel) = self.scan_cancel.take() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+
+                self.crawling_path = true;
+                self.scan_generation = self.scan_generation.wrapping_add(1);
+                let generation = self.scan_generation;
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.scan_cancel = Some(cancel.clone());
+                self.scan_progress = Some(crate::analyze::ScanProgress {
+                    discovered: 0,
+                    scanned: 0,
+                    current_path: s.clone(),
+                    percentage: 0.0,
+                });
                 self.crawl_path = s.clone();
                 self.core.set_header_title(format!(
                     "COSMIC DirStat - {}",
                     self.crawl_path.to_string_lossy().into_owned()
                 ));
-                return cosmic::Task::perform(
-                    async move { crate::analyze::analyze_dir(&s, &crate::analyze::Context {}) },
-                    |a| {
-                        match a {
-                            Ok(a) => Msg::Analyzed(Arc::new(a)),
-                            Err(e) => Msg::AnalyzedError(e.to_string()),
-                        }
-                        .into()
+
+                let stream = cosmic::iced::stream::channel(
+                    16,
+                    move |mut output: cosmic::iced::futures::channel::mpsc::Sender<ScanEvent>| async move {
+                        std::thread::spawn(move || {
+                            let mut progress_output = output.clone();
+                            let context =
+                                crate::analyze::Context::with_progress(cancel, move |progress| {
+                                    let _ = progress_output.try_send(ScanEvent::Progress(progress));
+                                });
+
+                            let result = crate::analyze::analyze_dir(&s, &context);
+                            for error in context.errors() {
+                                eprintln!(
+                                    "Skipped {}: {}",
+                                    error.path.to_string_lossy(),
+                                    error.message
+                                );
+                            }
+
+                            let result = result.map_err(|error| error.to_string());
+                            let _ = cosmic::iced::futures::executor::block_on(
+                                output.send(ScanEvent::Finished(result)),
+                            );
+                        });
                     },
                 );
+
+                let (task, handle) = cosmic::Task::run(stream, move |event| match event {
+                    ScanEvent::Progress(progress) => Msg::ScanProgress(generation, progress).into(),
+                    ScanEvent::Finished(Ok(analyzed)) => {
+                        Msg::Analyzed(generation, Arc::new(analyzed)).into()
+                    }
+                    ScanEvent::Finished(Err(error)) => Msg::AnalyzedError(generation, error).into(),
+                })
+                .abortable();
+                self.scan_handle = Some(handle);
+                return task;
             }
             Msg::CrawlPath { cancel } => {
                 if !cancel {
-                    self.crawling_path = true;
                     let crawl_path = self.crawl_path.clone();
 
                     return self.update(Msg::Crawl(crawl_path));
                 }
+                if let Some(handle) = self.scan_handle.take() {
+                    handle.abort();
+                }
+                if let Some(cancel) = self.scan_cancel.take() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                self.scan_generation = self.scan_generation.wrapping_add(1);
                 self.crawling_path = false;
+                self.scan_progress = None;
             }
             Msg::CrawlPathDialogue => {
                 return cosmic::Task::perform(rfd::AsyncFileDialog::new().pick_folder(), |f| {
@@ -329,8 +433,20 @@ impl cosmic::Application for App {
                 .and_then(cosmic::app::Task::done);
             }
             Msg::PaneResize(f) => self.state.resize(f.split, f.ratio),
-            Msg::Analyzed(a) => {
+            Msg::ScanProgress(generation, progress) => {
+                if generation == self.scan_generation {
+                    self.scan_progress = Some(progress);
+                }
+            }
+            Msg::Analyzed(generation, a) => {
+                if generation != self.scan_generation {
+                    return Task::none();
+                }
+
                 self.crawling_path = false;
+                self.scan_handle = None;
+                self.scan_cancel = None;
+                self.scan_progress = None;
                 self.analyzed = Some(a);
                 self.partition_view.clear();
                 if let Some(handle) = self.partition_rebuild_handle.take() {
@@ -339,8 +455,15 @@ impl cosmic::Application for App {
                 self.extensions_ordered.clear();
                 self.highlighted = None;
             }
-            Msg::AnalyzedError(e) => {
+            Msg::AnalyzedError(generation, e) => {
+                if generation != self.scan_generation {
+                    return Task::none();
+                }
+
                 self.crawling_path = false;
+                self.scan_handle = None;
+                self.scan_cancel = None;
+                self.scan_progress = None;
                 self.error = Some(e);
             }
             Msg::ClearError => self.error = None,

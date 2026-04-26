@@ -411,7 +411,7 @@ impl PartitionViewState {
             min: f64,
             dir: &AnalyzedDir,
             text_offset: f64,
-            extension_map: &mut HashMap<OsString, usize>,
+            extension_map: &mut HashMap<OsString, u64>,
             next_idx: &mut usize,
         ) -> Vec<PendingStateBox> {
             if space.1 < text_offset * 1.4 {
@@ -450,9 +450,9 @@ impl PartitionViewState {
                     });
                     if let Some(ext) = ext {
                         match extension_map.entry(ext.to_owned()) {
-                            Entry::Occupied(mut entry) => *entry.get_mut() += item.size as usize,
+                            Entry::Occupied(mut entry) => *entry.get_mut() += item.size,
                             Entry::Vacant(entry) => {
-                                entry.insert(item.size as _);
+                                entry.insert(item.size);
                             }
                         }
                     }
