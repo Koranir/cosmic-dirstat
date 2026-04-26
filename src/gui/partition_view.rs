@@ -1,11 +1,22 @@
-use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::atomic::AtomicUsize};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    ffi::OsString,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
     iced::{
-        mouse::Button, Background, Border, Color, Length, Point, Radius, Rectangle, Size, Vector,
+        Background, Border, Color, Length, Limits, Point, Radius, Rectangle, Shadow, Size, Vector,
+        advanced::{self, Layout, Renderer, layout, renderer::Quad, text},
+        core::{
+            Clipboard, Shell,
+            layout::Node,
+            widget::{Tree, tree},
+        },
+        mouse::{Button, Cursor},
     },
-    iced_core::{layout, text, Layout, Renderer, Shadow},
     prelude::ColorExt,
     widget::Widget,
 };
@@ -13,67 +24,184 @@ use treemap::Mappable;
 
 use crate::analyze::{self, AnalyzedDir, AnalyzedItem};
 
+#[derive(Debug, Clone)]
 pub enum StateBoxD {
     Branched(Vec<StateBox>),
     Leaf,
 }
 
+#[derive(Debug, Clone)]
+enum PendingStateBoxD {
+    Branched(Vec<PendingStateBox>),
+    Leaf,
+}
+
+#[derive(Debug, Clone)]
 pub struct StateBox {
     d: StateBoxD,
     placement: treemap::Rect,
-    size: u64,
-    name: String,
-    extension: Option<OsString>,
-    analyzed_item: Option<analyze::AnalyzedItem>,
+    label: String,
+    color: Color,
     idx: usize,
 }
-impl StateBox {
-    pub fn recurse_find(&self, at: (f32, f32), p: (f32, f32)) -> Option<(&Self, Option<&Self>)> {
-        let bounds = self.placement;
 
-        let quad_bounds = Rectangle::new(
-            Point::new(bounds.x as f32 + at.0, bounds.y as f32 + at.1),
-            Size::new(bounds.w as f32, bounds.h as f32),
-        );
+#[derive(Debug, Clone)]
+struct PendingStateBox {
+    d: PendingStateBoxD,
+    placement: treemap::Rect,
+    size: u64,
+    name: String,
+    label: String,
+    path: Option<PathBuf>,
+    extension: Option<OsString>,
+    idx: usize,
+}
 
-        if quad_bounds.contains(Point::new(p.0, p.1)) {
-            if let StateBoxD::Branched(d) = &self.d {
-                for ele in d {
-                    if let Some(p) = ele.recurse_find((quad_bounds.x, quad_bounds.y), p) {
-                        return Some((p.0, Some(p.1.unwrap_or(self))));
-                    }
-                }
+#[derive(Debug, Clone)]
+struct HitBox {
+    placement: treemap::Rect,
+    idx: usize,
+    name: String,
+    size: u64,
+    path: Option<PathBuf>,
+    parent_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Scale {
+    x: f32,
+    y: f32,
+}
+impl Scale {
+    const ONE: Self = Self { x: 1.0, y: 1.0 };
+
+    fn from_sizes(source: Size<f32>, target: Size<f32>) -> Self {
+        if source.width > 0.0 && source.height > 0.0 {
+            Self {
+                x: target.width / source.width,
+                y: target.height / source.height,
             }
-            Some((self, None))
         } else {
-            None
+            Self::ONE
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MapTransform {
+    origin: Point,
+    at: (f32, f32),
+    scale: Scale,
+}
+impl MapTransform {
+    fn root(origin: Point, scale: Scale) -> Self {
+        Self {
+            origin,
+            at: (0.0, 0.0),
+            scale,
         }
     }
 
-    pub fn draw<R: Renderer + cosmic::iced_core::text::Renderer>(
+    fn child(self, bounds: treemap::Rect) -> Self {
+        Self {
+            at: (self.at.0 + bounds.x as f32, self.at.1 + bounds.y as f32),
+            ..self
+        }
+    }
+
+    fn bounds(self, bounds: treemap::Rect) -> Rectangle {
+        Rectangle::new(
+            Point::new(
+                self.origin.x + (bounds.x as f32 + self.at.0) * self.scale.x,
+                self.origin.y + (bounds.y as f32 + self.at.1) * self.scale.y,
+            ),
+            Size::new(
+                bounds.w as f32 * self.scale.x,
+                bounds.h as f32 * self.scale.y,
+            ),
+        )
+    }
+}
+
+impl PendingStateBox {
+    fn into_state_box(
+        self,
+        colors: &HashMap<OsString, Color>,
+        fallback_color: Color,
+        parent_offset: (f64, f64),
+        parent_path: Option<&PathBuf>,
+        hit_boxes: &mut Vec<HitBox>,
+    ) -> StateBox {
+        let absolute_placement = treemap::Rect {
+            x: parent_offset.0 + self.placement.x,
+            y: parent_offset.1 + self.placement.y,
+            ..self.placement
+        };
+
+        hit_boxes.push(HitBox {
+            placement: absolute_placement,
+            idx: self.idx,
+            name: self.name.clone(),
+            size: self.size,
+            path: self.path.clone(),
+            parent_path: parent_path.cloned(),
+        });
+
+        let child_offset = (absolute_placement.x, absolute_placement.y);
+        let child_parent_path = self.path.as_ref().or(parent_path);
+        let d = match self.d {
+            PendingStateBoxD::Branched(children) => StateBoxD::Branched(
+                children
+                    .into_iter()
+                    .map(|child| {
+                        child.into_state_box(
+                            colors,
+                            fallback_color,
+                            child_offset,
+                            child_parent_path,
+                            hit_boxes,
+                        )
+                    })
+                    .collect(),
+            ),
+            PendingStateBoxD::Leaf => StateBoxD::Leaf,
+        };
+
+        StateBox {
+            d,
+            placement: self.placement,
+            label: self.label,
+            color: self
+                .extension
+                .as_ref()
+                .and_then(|ext| colors.get(ext).copied())
+                .unwrap_or(fallback_color),
+            idx: self.idx,
+        }
+    }
+}
+
+impl HitBox {
+    fn contains(&self, transform: MapTransform, p: Point) -> bool {
+        transform.bounds(self.placement).contains(p)
+    }
+}
+
+impl StateBox {
+    fn draw<R: Renderer + text::Renderer>(
         &self,
-        at: (f32, f32),
+        transform: MapTransform,
         renderer: &mut R,
         // level: usize,
         to_highlight: usize,
         text_size: f32,
-        colors: &HashMap<OsString, Color>,
-    ) -> Option<cosmic::iced_core::renderer::Quad> {
+    ) -> Option<Quad> {
         let bounds = self.placement;
 
-        let quad_bounds = Rectangle::new(
-            Point::new(bounds.x as f32 + at.0, bounds.y as f32 + at.1),
-            Size::new(bounds.w as f32, bounds.h as f32),
-        );
-
-        let col = self
-            .extension
-            .as_ref()
-            .and_then(|f| colors.get(f).copied())
-            .unwrap_or(Color::from_rgb8(100, 100, 100));
+        let quad_bounds = transform.bounds(bounds);
 
         renderer.fill_quad(
-            cosmic::iced_core::renderer::Quad {
+            Quad {
                 bounds: quad_bounds,
                 border: Border::default(),
                 shadow: Default::default(),
@@ -81,16 +209,17 @@ impl StateBox {
             },
             Background::Gradient(cosmic::iced::Gradient::Linear(
                 cosmic::iced::gradient::Linear::new(std::f32::consts::PI / 4.0)
-                    .add_stop(0.0, col)
-                    .add_stop(1.0, col.blend_alpha(Color::BLACK, 0.5)),
+                    .add_stop(0.0, self.color)
+                    .add_stop(1.0, self.color.blend_alpha(Color::BLACK, 0.5)),
             )),
         );
 
         let mut maybe_highlight = None;
         if let StateBoxD::Branched(d) = &self.d {
-            if quad_bounds.height > text_size {
+            let scaled_text_size = text_size * transform.scale.y;
+            if quad_bounds.height > scaled_text_size {
                 let mut bounds = quad_bounds.size();
-                bounds.height = text_size;
+                bounds.height = scaled_text_size;
                 // renderer.fill_text(
                 //     cosmic::iced_core::text::Text {
                 //         content: &self.name,
@@ -110,25 +239,18 @@ impl StateBox {
                 //     Color::BLACK,
                 //     quad_bounds,
                 // );
-                let f = format!(
-                    "{} - {}",
-                    &self.name,
-                    humansize::format_size(self.size, humansize::FormatSizeOptions::default())
-                );
                 renderer.fill_text(
-                    cosmic::iced_core::Text {
-                        content: f,
+                    advanced::Text {
+                        content: self.label.clone(),
                         bounds,
-                        size: text_size.into(),
+                        size: scaled_text_size.into(),
                         font: renderer.default_font(),
-                        align_x: cosmic::iced_core::text::Alignment::Default,
+                        align_x: text::Alignment::Default,
                         align_y: cosmic::iced::alignment::Vertical::Top,
                         line_height: text::LineHeight::default(),
                         shaping: text::Shaping::Advanced,
                         wrapping: text::Wrapping::WordOrGlyph,
-                        ellipsize: cosmic::iced_core::text::Ellipsize::Middle(
-                            cosmic::iced_core::text::EllipsizeHeightLimit::Lines(1),
-                        ),
+                        ellipsize: text::Ellipsize::Middle(text::EllipsizeHeightLimit::Lines(1)),
                     },
                     Point::new(quad_bounds.x, quad_bounds.y /* + text_size / 2.0*/),
                     Color::WHITE.blend_alpha(Color::BLACK, 0.8),
@@ -138,12 +260,11 @@ impl StateBox {
 
             for ele in d {
                 if let Some(r) = ele.draw(
-                    (quad_bounds.x, quad_bounds.y),
+                    transform.child(bounds),
                     renderer,
                     // level + 1,
                     to_highlight,
                     text_size,
-                    colors,
                 ) {
                     maybe_highlight = Some(r);
                 }
@@ -151,7 +272,7 @@ impl StateBox {
         }
 
         if self.idx == to_highlight {
-            maybe_highlight = Some(cosmic::iced_core::renderer::Quad {
+            maybe_highlight = Some(Quad {
                 bounds: quad_bounds,
                 border: Border {
                     color: Color::WHITE,
@@ -171,60 +292,307 @@ impl StateBox {
     }
 }
 
-pub struct State {
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionViewRebuild {
+    size: Size<f32>,
+    path: PathBuf,
+    text_size: f32,
+    minimum_area: f32,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionViewBuild {
+    request: PartitionViewRebuild,
     boxes: Vec<StateBox>,
-    highlighted: usize,
-    // highlighted_popup: Option<(Point, String, u64, PathBuf)>,
+    hit_boxes: Vec<HitBox>,
+    ordered_extension_map: Vec<(OsString, Color)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionViewState {
+    boxes: Vec<StateBox>,
+    hit_boxes: Vec<HitBox>,
     /// Extension -> Number of Files
     ordered_extension_map: Vec<(OsString, Color)>,
-    extension_map: HashMap<OsString, Color>,
-    contructed_for: Size<f32>,
-    constructed_for_path: PathBuf,
-    should_broadcast_ordered: bool,
+    constructed_for: Option<PartitionViewRebuild>,
+    rebuild_in_flight: Option<PartitionViewRebuild>,
+    generation: u64,
+}
+impl PartitionViewState {
+    pub fn new() -> Self {
+        Self {
+            boxes: Vec::new(),
+            hit_boxes: Vec::new(),
+            ordered_extension_map: Vec::new(),
+            constructed_for: None,
+            rebuild_in_flight: None,
+            generation: 0,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.boxes.clear();
+        self.hit_boxes.clear();
+        self.ordered_extension_map.clear();
+        self.constructed_for = None;
+        self.rebuild_in_flight = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn rebuild_request(
+        &self,
+        size: Size<f32>,
+        path: PathBuf,
+        text_size: f32,
+        minimum_area: f32,
+    ) -> PartitionViewRebuild {
+        PartitionViewRebuild {
+            size,
+            path,
+            text_size,
+            minimum_area,
+            generation: self.generation,
+        }
+    }
+
+    pub fn needs_rebuild(&self, request: &PartitionViewRebuild) -> bool {
+        self.constructed_for.as_ref() != Some(request)
+            && self.rebuild_in_flight.as_ref() != Some(request)
+    }
+
+    pub fn request_rebuild(
+        &mut self,
+        request: PartitionViewRebuild,
+    ) -> Option<PartitionViewRebuild> {
+        if request.generation != self.generation {
+            return None;
+        }
+
+        if !self.needs_rebuild(&request) {
+            return None;
+        }
+
+        self.rebuild_in_flight = Some(request.clone());
+        Some(request)
+    }
+
+    pub fn finish_rebuild(&mut self, build: PartitionViewBuild) -> bool {
+        if self.rebuild_in_flight.as_ref() != Some(&build.request) {
+            return false;
+        }
+
+        self.boxes = build.boxes;
+        self.hit_boxes = build.hit_boxes;
+        self.ordered_extension_map = build.ordered_extension_map;
+        self.constructed_for = Some(build.request);
+        self.rebuild_in_flight = None;
+
+        true
+    }
+
+    pub fn ordered_extensions(&self) -> &[(OsString, Color)] {
+        &self.ordered_extension_map
+    }
+
+    fn scale_for(&self, size: Size<f32>) -> Scale {
+        self.constructed_for
+            .as_ref()
+            .map_or(Scale::ONE, |request| Scale::from_sizes(request.size, size))
+    }
+
+    pub fn build(
+        request: PartitionViewRebuild,
+        dir: Arc<AnalyzedDir>,
+        base_col: cosmic::theme::CosmicColor,
+    ) -> PartitionViewBuild {
+        fn recursive_box(
+            space: (f64, f64),
+            min: f64,
+            dir: &AnalyzedDir,
+            text_offset: f64,
+            extension_map: &mut HashMap<OsString, u64>,
+            next_idx: &mut usize,
+        ) -> Vec<PendingStateBox> {
+            if space.1 < text_offset * 1.4 {
+                return vec![];
+            }
+
+            let partitioned =
+                analyze::partition((space.0, text_offset.mul_add(-1.4, space.1)), min, dir);
+
+            partitioned
+                .into_iter()
+                .map(|mut item| {
+                    let mut bounds_ = *item.bounds();
+                    bounds_.y = text_offset.mul_add(1.4, bounds_.y);
+                    item.set_bounds(bounds_);
+                    let d = match item.item {
+                        Some(analyze::AnalyzedItem::Dir(d)) => {
+                            PendingStateBoxD::Branched(recursive_box(
+                                (item.bounds().w, item.bounds().h),
+                                min,
+                                d,
+                                text_offset,
+                                extension_map,
+                                next_idx,
+                            ))
+                        }
+                        _ => PendingStateBoxD::Leaf,
+                    };
+
+                    let ext = item.item.and_then(|f| {
+                        if let AnalyzedItem::File(f) = f {
+                            f.path.extension()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(ext) = ext {
+                        match extension_map.entry(ext.to_owned()) {
+                            Entry::Occupied(mut entry) => *entry.get_mut() += item.size,
+                            Entry::Vacant(entry) => {
+                                entry.insert(item.size);
+                            }
+                        }
+                    }
+
+                    let idx = *next_idx;
+                    *next_idx += 1;
+                    let name = item.item.map_or("<files>".into(), |f| {
+                        f.name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+                    let path = item.item.map(AnalyzedItem::path).map(PathBuf::from);
+                    let label = format!(
+                        "{} - {}",
+                        name,
+                        humansize::format_size(item.size, humansize::FormatSizeOptions::default())
+                    );
+
+                    PendingStateBox {
+                        d,
+                        placement: item.placement,
+                        size: item.size,
+                        name,
+                        label,
+                        path,
+                        extension: ext.map(std::ffi::OsStr::to_os_string),
+                        idx,
+                    }
+                })
+                .collect()
+        }
+
+        let mut extension_map = HashMap::new();
+        let mut next_idx = 0;
+        let pending_boxes = recursive_box(
+            (
+                f64::from(request.size.width),
+                f64::from(request.size.height),
+            ),
+            f64::from(request.minimum_area),
+            &dir,
+            f64::from(request.text_size),
+            &mut extension_map,
+            &mut next_idx,
+        );
+
+        let cols = Vec::from_iter((0usize..).take(extension_map.len()).map(|f| {
+            let shifted = (f as f32 * 1.618).rem_euclid(1.0);
+
+            let new =
+                ShiftHue::shift_hue(Okhsl::from_color(base_col.color), shifted * 360.0).darken(0.5);
+            let rgba = cosmic::cosmic_theme::palette::Srgb::from_color(new);
+            cosmic::iced::Color::from_linear_rgba(rgba.red, rgba.green, rgba.blue, 1.0)
+        }));
+        let mut ext = extension_map.into_iter().collect::<Vec<_>>();
+        ext.sort_by_key(|f| f.1);
+
+        let ordered_extension_map = ext
+            .into_iter()
+            .rev()
+            .enumerate()
+            .map(|(index, f)| (f.0, cols[index]))
+            .collect::<Vec<_>>();
+        let extension_map = ordered_extension_map
+            .iter()
+            .map(|(extension, color)| (extension.clone(), *color))
+            .collect::<HashMap<_, _>>();
+        let fallback_color = Color::from_rgb8(100, 100, 100);
+        let mut hit_boxes = Vec::with_capacity(next_idx);
+        let boxes = pending_boxes
+            .into_iter()
+            .map(|pending| {
+                pending.into_state_box(
+                    &extension_map,
+                    fallback_color,
+                    (0.0, 0.0),
+                    None,
+                    &mut hit_boxes,
+                )
+            })
+            .collect();
+
+        PartitionViewBuild {
+            request,
+            boxes,
+            hit_boxes,
+            ordered_extension_map,
+        }
+    }
+}
+impl Default for PartitionViewState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct State {
+    highlighted: usize,
+    rebuild_request: Option<PartitionViewRebuild>,
 }
 
 #[allow(clippy::type_complexity)]
 pub struct PartitionView<'a, Msg> {
     items: &'a AnalyzedDir,
+    state: &'a PartitionViewState,
     text_size: f32,
     minimum_area: f32,
+    on_rebuild_needed: Box<dyn FnMut(PartitionViewRebuild) -> Msg>,
     on_click: Box<dyn FnMut(PathBuf) -> Msg>,
-    on_colors: Box<dyn FnMut(Vec<(OsString, Color)>) -> Msg>,
-    on_item_hovered: Box<dyn FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg>, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+    on_item_hovered: Box<dyn FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg>,
 }
 impl<'a, Msg> PartitionView<'a, Msg> {
     pub fn new(
         items: &'a AnalyzedDir,
+        state: &'a PartitionViewState,
         text_size: f32,
         minimum_area: f32,
+        on_rebuild_needed: impl FnMut(PartitionViewRebuild) -> Msg + 'static,
         on_click: impl FnMut(PathBuf) -> Msg + 'static,
-        on_colors: impl FnMut(Vec<(OsString, Color)>) -> Msg + 'static,
-        on_item_hovered: impl FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg + 'static, // extension_map: Arc<Mutex<Vec<(OsString, Color)>>>,
+        on_item_hovered: impl FnMut(Option<(Point, String, u64, PathBuf)>) -> Msg + 'static,
     ) -> Self {
         Self {
             items,
+            state,
             text_size,
             minimum_area,
+            on_rebuild_needed: Box::new(on_rebuild_needed),
             on_click: Box::new(on_click),
-            // extension_map,
-            on_colors: Box::new(on_colors),
             on_item_hovered: Box::new(on_item_hovered),
         }
     }
 }
-impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::text::Renderer>
-    Widget<Message, Theme, Renderer> for PartitionView<'_, Message>
+impl<Message, Theme, Renderer: advanced::Renderer + text::Renderer> Widget<Message, Theme, Renderer>
+    for PartitionView<'_, Message>
 {
-    fn state(&self) -> cosmic::iced_core::widget::tree::State {
-        cosmic::iced_core::widget::tree::State::Some(Box::new(State {
-            boxes: vec![],
+    fn state(&self) -> tree::State {
+        tree::State::Some(Box::new(State {
             highlighted: usize::MAX,
-            // highlighted_popup: None,
-            extension_map: Default::default(),
-            contructed_for: Size::ZERO,
-            constructed_for_path: Default::default(),
-            ordered_extension_map: Vec::new(),
-            should_broadcast_ordered: false,
+            rebuild_request: None,
         }))
     }
 
@@ -235,128 +603,22 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut cosmic::iced_core::widget::Tree,
-        _renderer: &Renderer,
-        limits: &cosmic::iced_core::layout::Limits,
-    ) -> cosmic::iced_core::layout::Node {
+    fn layout(&mut self, tree: &mut Tree, _renderer: &Renderer, limits: &Limits) -> Node {
         let layout = layout::atomic(limits, Length::Fill, Length::Fill);
 
         let state: &mut State = tree.state.downcast_mut();
 
-        if layout.bounds().size() != state.contructed_for
-            || self.items.path != state.constructed_for_path
-        {
-            fn recursive_box(
-                space: (f64, f64),
-                min: f64,
-                dir: &AnalyzedDir,
-                text_offset: f64,
-                // text_size: f32,
-                extension_map: &mut HashMap<OsString, usize>,
-            ) -> Vec<StateBox> {
-                static IDX: AtomicUsize = AtomicUsize::new(0);
+        let request = self.state.rebuild_request(
+            layout.bounds().size(),
+            self.items.path.clone(),
+            self.text_size,
+            self.minimum_area,
+        );
 
-                if space.1 < text_offset * 1.4 {
-                    return vec![];
-                }
-
-                let partitioned =
-                    analyze::partition((space.0, text_offset.mul_add(-1.4, space.1)), min, dir);
-
-                partitioned
-                    .into_iter()
-                    .map(|mut item| {
-                        let mut bounds_ = *item.bounds();
-                        bounds_.y = text_offset.mul_add(1.4, bounds_.y);
-                        item.set_bounds(bounds_);
-                        // dbg!(opt_dir);
-                        let d = match item.item {
-                            Some(analyze::AnalyzedItem::Dir(d)) => {
-                                StateBoxD::Branched(recursive_box(
-                                    (item.bounds().w, item.bounds().h),
-                                    min,
-                                    d,
-                                    text_offset,
-                                    // text_size,
-                                    extension_map,
-                                ))
-                            }
-                            _ => StateBoxD::Leaf,
-                        };
-
-                        let ext = item.item.and_then(|f| {
-                            if let AnalyzedItem::File(f) = f {
-                                f.path.extension()
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(ext) = ext {
-                            if extension_map.contains_key(ext) {
-                                *extension_map.get_mut(ext).unwrap() += item.size as usize;
-                            } else {
-                                extension_map.insert(ext.to_owned(), item.size as _);
-                            }
-                        }
-
-                        StateBox {
-                            d,
-                            name: item.item.map_or("<files>".into(), |f| {
-                                f.name()
-                                    .map(|f| f.to_string_lossy().into_owned())
-                                    .unwrap_or_default()
-                            }),
-                            idx: IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                            analyzed_item: item.item.cloned(),
-                            placement: item.placement,
-                            size: item.size,
-                            extension: ext.map(std::ffi::OsStr::to_os_string),
-                        }
-                    })
-                    .collect()
-            }
-
-            let mut extension_map = Default::default();
-            state.boxes = recursive_box(
-                (
-                    f64::from(layout.bounds().width),
-                    f64::from(layout.bounds().height),
-                ),
-                f64::from(self.minimum_area),
-                self.items,
-                f64::from(self.text_size),
-                // self.text_size,
-                &mut extension_map,
-            );
-
-            let len = extension_map.len();
-
-            let base_col = cosmic::theme::active().cosmic().accent.base;
-            let cols = Vec::from_iter((0usize..).take(extension_map.len()).map(|f| {
-                let shifted = (f as f32 * 1.618).rem_euclid(1.0);
-
-                let new = ShiftHue::shift_hue(Okhsl::from_color(base_col.color), shifted * 360.0)
-                    .darken(0.5);
-                let rgba = cosmic::cosmic_theme::palette::Srgb::from_color(new);
-                cosmic::iced::Color::from_linear_rgba(rgba.red, rgba.green, rgba.blue, 1.0)
-            }));
-            let mut ext = extension_map.into_iter().collect::<Vec<_>>();
-            ext.sort_by_key(|f| f.1);
-
-            state.should_broadcast_ordered = true;
-
-            state.ordered_extension_map = ext
-                .into_iter()
-                .rev()
-                .enumerate()
-                .take(len)
-                .map(|(index, f)| (f.0, cols[index]))
-                .collect();
-            state.extension_map = state.ordered_extension_map.clone().into_iter().collect();
-            state.contructed_for = layout.bounds().size();
-            state.constructed_for_path = self.items.path.clone();
+        if self.state.needs_rebuild(&request) {
+            state.rebuild_request = Some(request);
+        } else {
+            state.rebuild_request = None;
         }
 
         layout
@@ -364,56 +626,52 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
 
     fn update(
         &mut self,
-        state: &mut cosmic::iced_core::widget::Tree,
+        state: &mut Tree,
         event: &cosmic::iced::Event,
         layout: Layout<'_>,
-        cursor: cosmic::iced_core::mouse::Cursor,
+        cursor: Cursor,
         _renderer: &Renderer,
-        _clipboard: &mut dyn cosmic::iced_core::Clipboard,
-        shell: &mut cosmic::iced_core::Shell<'_, Message>,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
         let state: &mut State = state.state.downcast_mut();
 
-        if state.should_broadcast_ordered {
-            state.should_broadcast_ordered = false;
-            shell.publish((self.on_colors)(state.ordered_extension_map.clone()));
+        if let Some(request) = state.rebuild_request.take() {
+            shell.publish((self.on_rebuild_needed)(request));
+            shell.request_redraw();
         }
 
         if let cosmic::iced::Event::Mouse(mev) = event {
             let pos = cursor.position().unwrap_or_default();
+            let scale = self.state.scale_for(layout.bounds().size());
+            let origin = Point::new(layout.bounds().x, layout.bounds().y);
+            let transform = MapTransform::root(origin, scale);
+            let pos = Point::new(pos.x, pos.y);
 
-            let highlighted = state.boxes.iter().find_map(|b| {
-                b.recurse_find((layout.bounds().x, layout.bounds().y), (pos.x, pos.y))
-            });
+            let highlighted = self
+                .state
+                .hit_boxes
+                .iter()
+                .rev()
+                .find(|hit| hit.contains(transform, pos));
             match mev {
                 cosmic::iced::mouse::Event::CursorMoved { position: _ } => {
-                    shell.publish((self.on_item_hovered)(highlighted.map(|(f, _)| {
+                    shell.publish((self.on_item_hovered)(highlighted.map(|hit| {
                         (
                             pos,
-                            f.name.clone(),
-                            f.size,
-                            f.analyzed_item
-                                .as_ref()
-                                .map(|f| f.path().to_owned())
-                                .unwrap_or_default(),
+                            hit.name.clone(),
+                            hit.size,
+                            hit.path.clone().unwrap_or_default(),
                         )
                     })));
-                    // state.highlighted_popup = highlighted.map(|(f, _)| ());
-                    state.highlighted = highlighted.map_or(usize::MAX, |(f, _)| f.idx);
+                    state.highlighted = highlighted.map_or(usize::MAX, |hit| hit.idx);
                 }
                 cosmic::iced::mouse::Event::ButtonPressed(Button::Left) => {
-                    if let Some((f, parent)) = highlighted {
-                        shell.publish((self.on_click)(
-                            f.analyzed_item
-                                .as_ref().map_or_else(|| {
-                                    parent.map_or_else(|| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        }, |f| {
-                                            f.analyzed_item.as_ref().unwrap().path().to_owned()
-                                        })
-                                }, |f| f.path().to_owned()),
-                        ));
+                    if let Some(path) = highlighted
+                        .and_then(|hit| hit.path.clone().or_else(|| hit.parent_path.clone()))
+                    {
+                        shell.publish((self.on_click)(path));
                     }
                 }
                 _ => {}
@@ -423,25 +681,27 @@ impl<Message, Theme, Renderer: cosmic::iced_core::Renderer + cosmic::iced_core::
 
     fn draw(
         &self,
-        tree: &cosmic::iced_core::widget::Tree,
+        tree: &Tree,
         renderer: &mut Renderer,
         _theme: &Theme,
-        _style: &cosmic::iced_core::renderer::Style,
-        layout: cosmic::iced_core::Layout<'_>,
-        _cursor: cosmic::iced_core::mouse::Cursor,
+        _style: &advanced::renderer::Style,
+        layout: Layout<'_>,
+        _cursor: Cursor,
         _viewport: &cosmic::iced::Rectangle,
     ) {
         let state: &State = tree.state.downcast_ref();
+        let scale = self.state.scale_for(layout.bounds().size());
+        let origin = Point::new(layout.bounds().x, layout.bounds().y);
+        let transform = MapTransform::root(origin, scale);
 
         let mut highlight = None;
-        for ele in &state.boxes {
+        for ele in &self.state.boxes {
             if let Some(r) = ele.draw(
-                (layout.bounds().x, layout.bounds().y),
+                transform,
                 renderer,
                 // 0,
                 state.highlighted,
                 self.text_size,
-                &state.extension_map,
             ) {
                 highlight = Some(r);
             }

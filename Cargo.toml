@@ -8,9 +8,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-cosmic-files = { git = "https://github.com/pop-os/cosmic-files.git", version = "1.0.8", default-features = false }
+cosmic-files = { git = "https://github.com/pop-os/cosmic-files.git", version = "1.0.11", default-features = false }
 humansize = "2.1.3"
-open = "5.3.3"
+open = "5.3.4"
 rfd = "0.17.2"
 treemap = "0.3.2"
 
