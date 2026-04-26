@@ -46,13 +46,14 @@ struct App {
     tree: tree::FileTree,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
     partition_view: partition_view::PartitionViewState,
+    partition_rebuild_handle: Option<cosmic::iced::task::Handle>,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
     highlighted: Option<(Point, String, u64, PathBuf)>,
 }
 impl App {
     fn partition_rebuild_task(
-        &self,
+        &mut self,
         request: partition_view::PartitionViewRebuild,
     ) -> cosmic::app::Task<Msg> {
         let Some(analyzed) = self.analyzed.clone() else {
@@ -60,19 +61,29 @@ impl App {
         };
         let base_col = cosmic::theme::active().cosmic().accent.base;
 
-        cosmic::Task::perform(
+        if let Some(handle) = self.partition_rebuild_handle.take() {
+            handle.abort();
+        }
+
+        let (task, handle) = cosmic::Task::perform(
             async move { partition_view::PartitionViewState::build(request, analyzed, base_col) },
             |build| Msg::PartitionViewRebuilt(Arc::new(build)).into(),
         )
+        .abortable();
+        self.partition_rebuild_handle = Some(handle);
+
+        task
     }
 
     fn request_partition_rebuild(
         &mut self,
         request: partition_view::PartitionViewRebuild,
     ) -> cosmic::app::Task<Msg> {
-        self.partition_view
-            .request_rebuild(request)
-            .map_or_else(Task::none, |request| self.partition_rebuild_task(request))
+        if let Some(request) = self.partition_view.request_rebuild(request) {
+            self.partition_rebuild_task(request)
+        } else {
+            Task::none()
+        }
     }
 
     #[allow(dead_code)]
@@ -251,6 +262,7 @@ impl cosmic::Application for App {
             state,
             analyzed: None,
             partition_view: partition_view::PartitionViewState::new(),
+            partition_rebuild_handle: None,
             error: None,
             extensions_ordered: Vec::new(),
             highlighted: None,
@@ -321,6 +333,9 @@ impl cosmic::Application for App {
                 self.crawling_path = false;
                 self.analyzed = Some(a);
                 self.partition_view.clear();
+                if let Some(handle) = self.partition_rebuild_handle.take() {
+                    handle.abort();
+                }
                 self.extensions_ordered.clear();
                 self.highlighted = None;
             }
@@ -334,14 +349,11 @@ impl cosmic::Application for App {
             }
             Msg::PartitionViewRebuilt(build) => {
                 let build = Arc::try_unwrap(build).unwrap_or_else(|build| (*build).clone());
-                let (applied, next) = self.partition_view.finish_rebuild(build);
+                let applied = self.partition_view.finish_rebuild(build);
 
                 if applied {
+                    self.partition_rebuild_handle = None;
                     self.extensions_ordered = self.partition_view.ordered_extensions().to_vec();
-                }
-
-                if let Some(request) = next {
-                    return self.partition_rebuild_task(request);
                 }
             }
             Msg::NewItemHighlighted(h) => match h {

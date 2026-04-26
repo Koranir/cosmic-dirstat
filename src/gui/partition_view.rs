@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    ffi::OsString,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use cosmic::{
     cosmic_theme::palette::{Darken, FromColor, Okhsl, ShiftHue},
@@ -26,14 +31,40 @@ pub enum StateBoxD {
 }
 
 #[derive(Debug, Clone)]
+enum PendingStateBoxD {
+    Branched(Vec<PendingStateBox>),
+    Leaf,
+}
+
+#[derive(Debug, Clone)]
 pub struct StateBox {
     d: StateBoxD,
     placement: treemap::Rect,
+    label: String,
+    color: Color,
+    idx: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PendingStateBox {
+    d: PendingStateBoxD,
+    placement: treemap::Rect,
     size: u64,
     name: String,
+    label: String,
+    path: Option<PathBuf>,
     extension: Option<OsString>,
-    analyzed_item: Option<analyze::AnalyzedItem>,
     idx: usize,
+}
+
+#[derive(Debug, Clone)]
+struct HitBox {
+    placement: treemap::Rect,
+    idx: usize,
+    name: String,
+    size: u64,
+    path: Option<PathBuf>,
+    parent_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -92,30 +123,71 @@ impl MapTransform {
     }
 }
 
-impl StateBox {
-    fn recurse_find(
-        &self,
-        transform: MapTransform,
-        p: (f32, f32),
-    ) -> Option<(&Self, Option<&Self>)> {
-        let bounds = self.placement;
+impl PendingStateBox {
+    fn into_state_box(
+        self,
+        colors: &HashMap<OsString, Color>,
+        fallback_color: Color,
+        parent_offset: (f64, f64),
+        parent_path: Option<&PathBuf>,
+        hit_boxes: &mut Vec<HitBox>,
+    ) -> StateBox {
+        let absolute_placement = treemap::Rect {
+            x: parent_offset.0 + self.placement.x,
+            y: parent_offset.1 + self.placement.y,
+            ..self.placement
+        };
 
-        let quad_bounds = transform.bounds(bounds);
+        hit_boxes.push(HitBox {
+            placement: absolute_placement,
+            idx: self.idx,
+            name: self.name.clone(),
+            size: self.size,
+            path: self.path.clone(),
+            parent_path: parent_path.cloned(),
+        });
 
-        if quad_bounds.contains(Point::new(p.0, p.1)) {
-            if let StateBoxD::Branched(d) = &self.d {
-                for ele in d {
-                    if let Some(p) = ele.recurse_find(transform.child(bounds), p) {
-                        return Some((p.0, Some(p.1.unwrap_or(self))));
-                    }
-                }
-            }
-            Some((self, None))
-        } else {
-            None
+        let child_offset = (absolute_placement.x, absolute_placement.y);
+        let child_parent_path = self.path.as_ref().or(parent_path);
+        let d = match self.d {
+            PendingStateBoxD::Branched(children) => StateBoxD::Branched(
+                children
+                    .into_iter()
+                    .map(|child| {
+                        child.into_state_box(
+                            colors,
+                            fallback_color,
+                            child_offset,
+                            child_parent_path,
+                            hit_boxes,
+                        )
+                    })
+                    .collect(),
+            ),
+            PendingStateBoxD::Leaf => StateBoxD::Leaf,
+        };
+
+        StateBox {
+            d,
+            placement: self.placement,
+            label: self.label,
+            color: self
+                .extension
+                .as_ref()
+                .and_then(|ext| colors.get(ext).copied())
+                .unwrap_or(fallback_color),
+            idx: self.idx,
         }
     }
+}
 
+impl HitBox {
+    fn contains(&self, transform: MapTransform, p: Point) -> bool {
+        transform.bounds(self.placement).contains(p)
+    }
+}
+
+impl StateBox {
     fn draw<R: Renderer + text::Renderer>(
         &self,
         transform: MapTransform,
@@ -123,17 +195,10 @@ impl StateBox {
         // level: usize,
         to_highlight: usize,
         text_size: f32,
-        colors: &HashMap<OsString, Color>,
     ) -> Option<Quad> {
         let bounds = self.placement;
 
         let quad_bounds = transform.bounds(bounds);
-
-        let col = self
-            .extension
-            .as_ref()
-            .and_then(|f| colors.get(f).copied())
-            .unwrap_or(Color::from_rgb8(100, 100, 100));
 
         renderer.fill_quad(
             Quad {
@@ -144,8 +209,8 @@ impl StateBox {
             },
             Background::Gradient(cosmic::iced::Gradient::Linear(
                 cosmic::iced::gradient::Linear::new(std::f32::consts::PI / 4.0)
-                    .add_stop(0.0, col)
-                    .add_stop(1.0, col.blend_alpha(Color::BLACK, 0.5)),
+                    .add_stop(0.0, self.color)
+                    .add_stop(1.0, self.color.blend_alpha(Color::BLACK, 0.5)),
             )),
         );
 
@@ -174,14 +239,9 @@ impl StateBox {
                 //     Color::BLACK,
                 //     quad_bounds,
                 // );
-                let f = format!(
-                    "{} - {}",
-                    &self.name,
-                    humansize::format_size(self.size, humansize::FormatSizeOptions::default())
-                );
                 renderer.fill_text(
                     advanced::Text {
-                        content: f,
+                        content: self.label.clone(),
                         bounds,
                         size: scaled_text_size.into(),
                         font: renderer.default_font(),
@@ -205,7 +265,6 @@ impl StateBox {
                     // level + 1,
                     to_highlight,
                     text_size,
-                    colors,
                 ) {
                     maybe_highlight = Some(r);
                 }
@@ -246,41 +305,38 @@ pub struct PartitionViewRebuild {
 pub struct PartitionViewBuild {
     request: PartitionViewRebuild,
     boxes: Vec<StateBox>,
+    hit_boxes: Vec<HitBox>,
     ordered_extension_map: Vec<(OsString, Color)>,
-    extension_map: HashMap<OsString, Color>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PartitionViewState {
     boxes: Vec<StateBox>,
+    hit_boxes: Vec<HitBox>,
     /// Extension -> Number of Files
     ordered_extension_map: Vec<(OsString, Color)>,
-    extension_map: HashMap<OsString, Color>,
     constructed_for: Option<PartitionViewRebuild>,
     rebuild_in_flight: Option<PartitionViewRebuild>,
-    queued_rebuild: Option<PartitionViewRebuild>,
     generation: u64,
 }
 impl PartitionViewState {
     pub fn new() -> Self {
         Self {
             boxes: Vec::new(),
+            hit_boxes: Vec::new(),
             ordered_extension_map: Vec::new(),
-            extension_map: HashMap::new(),
             constructed_for: None,
             rebuild_in_flight: None,
-            queued_rebuild: None,
             generation: 0,
         }
     }
 
     pub fn clear(&mut self) {
         self.boxes.clear();
+        self.hit_boxes.clear();
         self.ordered_extension_map.clear();
-        self.extension_map.clear();
         self.constructed_for = None;
         self.rebuild_in_flight = None;
-        self.queued_rebuild = None;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -303,7 +359,6 @@ impl PartitionViewState {
     pub fn needs_rebuild(&self, request: &PartitionViewRebuild) -> bool {
         self.constructed_for.as_ref() != Some(request)
             && self.rebuild_in_flight.as_ref() != Some(request)
-            && self.queued_rebuild.as_ref() != Some(request)
     }
 
     pub fn request_rebuild(
@@ -318,39 +373,22 @@ impl PartitionViewState {
             return None;
         }
 
-        if self.rebuild_in_flight.is_some() {
-            self.queued_rebuild = Some(request);
-            None
-        } else {
-            self.rebuild_in_flight = Some(request.clone());
-            Some(request)
-        }
+        self.rebuild_in_flight = Some(request.clone());
+        Some(request)
     }
 
-    pub fn finish_rebuild(
-        &mut self,
-        build: PartitionViewBuild,
-    ) -> (bool, Option<PartitionViewRebuild>) {
+    pub fn finish_rebuild(&mut self, build: PartitionViewBuild) -> bool {
         if self.rebuild_in_flight.as_ref() != Some(&build.request) {
-            return (false, None);
+            return false;
         }
 
         self.boxes = build.boxes;
+        self.hit_boxes = build.hit_boxes;
         self.ordered_extension_map = build.ordered_extension_map;
-        self.extension_map = build.extension_map;
         self.constructed_for = Some(build.request);
         self.rebuild_in_flight = None;
 
-        let next = self.queued_rebuild.take().and_then(|request| {
-            if self.needs_rebuild(&request) {
-                self.rebuild_in_flight = Some(request.clone());
-                Some(request)
-            } else {
-                None
-            }
-        });
-
-        (true, next)
+        true
     }
 
     pub fn ordered_extensions(&self) -> &[(OsString, Color)] {
@@ -375,7 +413,7 @@ impl PartitionViewState {
             text_offset: f64,
             extension_map: &mut HashMap<OsString, usize>,
             next_idx: &mut usize,
-        ) -> Vec<StateBox> {
+        ) -> Vec<PendingStateBox> {
             if space.1 < text_offset * 1.4 {
                 return vec![];
             }
@@ -390,15 +428,17 @@ impl PartitionViewState {
                     bounds_.y = text_offset.mul_add(1.4, bounds_.y);
                     item.set_bounds(bounds_);
                     let d = match item.item {
-                        Some(analyze::AnalyzedItem::Dir(d)) => StateBoxD::Branched(recursive_box(
-                            (item.bounds().w, item.bounds().h),
-                            min,
-                            d,
-                            text_offset,
-                            extension_map,
-                            next_idx,
-                        )),
-                        _ => StateBoxD::Leaf,
+                        Some(analyze::AnalyzedItem::Dir(d)) => {
+                            PendingStateBoxD::Branched(recursive_box(
+                                (item.bounds().w, item.bounds().h),
+                                min,
+                                d,
+                                text_offset,
+                                extension_map,
+                                next_idx,
+                            ))
+                        }
+                        _ => PendingStateBoxD::Leaf,
                     };
 
                     let ext = item.item.and_then(|f| {
@@ -409,28 +449,37 @@ impl PartitionViewState {
                         }
                     });
                     if let Some(ext) = ext {
-                        if extension_map.contains_key(ext) {
-                            *extension_map.get_mut(ext).unwrap() += item.size as usize;
-                        } else {
-                            extension_map.insert(ext.to_owned(), item.size as _);
+                        match extension_map.entry(ext.to_owned()) {
+                            Entry::Occupied(mut entry) => *entry.get_mut() += item.size as usize,
+                            Entry::Vacant(entry) => {
+                                entry.insert(item.size as _);
+                            }
                         }
                     }
 
                     let idx = *next_idx;
                     *next_idx += 1;
+                    let name = item.item.map_or("<files>".into(), |f| {
+                        f.name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+                    let path = item.item.map(AnalyzedItem::path).map(PathBuf::from);
+                    let label = format!(
+                        "{} - {}",
+                        name,
+                        humansize::format_size(item.size, humansize::FormatSizeOptions::default())
+                    );
 
-                    StateBox {
+                    PendingStateBox {
                         d,
-                        name: item.item.map_or("<files>".into(), |f| {
-                            f.name()
-                                .map(|f| f.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        }),
-                        idx,
-                        analyzed_item: item.item.cloned(),
                         placement: item.placement,
                         size: item.size,
+                        name,
+                        label,
+                        path,
                         extension: ext.map(std::ffi::OsStr::to_os_string),
+                        idx,
                     }
                 })
                 .collect()
@@ -438,7 +487,7 @@ impl PartitionViewState {
 
         let mut extension_map = HashMap::new();
         let mut next_idx = 0;
-        let boxes = recursive_box(
+        let pending_boxes = recursive_box(
             (
                 f64::from(request.size.width),
                 f64::from(request.size.height),
@@ -449,8 +498,6 @@ impl PartitionViewState {
             &mut extension_map,
             &mut next_idx,
         );
-
-        let len = extension_map.len();
 
         let cols = Vec::from_iter((0usize..).take(extension_map.len()).map(|f| {
             let shifted = (f as f32 * 1.618).rem_euclid(1.0);
@@ -467,16 +514,32 @@ impl PartitionViewState {
             .into_iter()
             .rev()
             .enumerate()
-            .take(len)
             .map(|(index, f)| (f.0, cols[index]))
             .collect::<Vec<_>>();
-        let extension_map = ordered_extension_map.clone().into_iter().collect();
+        let extension_map = ordered_extension_map
+            .iter()
+            .map(|(extension, color)| (extension.clone(), *color))
+            .collect::<HashMap<_, _>>();
+        let fallback_color = Color::from_rgb8(100, 100, 100);
+        let mut hit_boxes = Vec::with_capacity(next_idx);
+        let boxes = pending_boxes
+            .into_iter()
+            .map(|pending| {
+                pending.into_state_box(
+                    &extension_map,
+                    fallback_color,
+                    (0.0, 0.0),
+                    None,
+                    &mut hit_boxes,
+                )
+            })
+            .collect();
 
         PartitionViewBuild {
             request,
             boxes,
+            hit_boxes,
             ordered_extension_map,
-            extension_map,
         }
     }
 }
@@ -584,38 +647,31 @@ impl<Message, Theme, Renderer: advanced::Renderer + text::Renderer> Widget<Messa
             let scale = self.state.scale_for(layout.bounds().size());
             let origin = Point::new(layout.bounds().x, layout.bounds().y);
             let transform = MapTransform::root(origin, scale);
+            let pos = Point::new(pos.x, pos.y);
 
             let highlighted = self
                 .state
-                .boxes
+                .hit_boxes
                 .iter()
-                .find_map(|b| b.recurse_find(transform, (pos.x, pos.y)));
+                .rev()
+                .find(|hit| hit.contains(transform, pos));
             match mev {
                 cosmic::iced::mouse::Event::CursorMoved { position: _ } => {
-                    shell.publish((self.on_item_hovered)(highlighted.map(|(f, _)| {
+                    shell.publish((self.on_item_hovered)(highlighted.map(|hit| {
                         (
                             pos,
-                            f.name.clone(),
-                            f.size,
-                            f.analyzed_item
-                                .as_ref()
-                                .map(|f| f.path().to_owned())
-                                .unwrap_or_default(),
+                            hit.name.clone(),
+                            hit.size,
+                            hit.path.clone().unwrap_or_default(),
                         )
                     })));
-                    state.highlighted = highlighted.map_or(usize::MAX, |(f, _)| f.idx);
+                    state.highlighted = highlighted.map_or(usize::MAX, |hit| hit.idx);
                 }
                 cosmic::iced::mouse::Event::ButtonPressed(Button::Left) => {
-                    if let Some((f, parent)) = highlighted {
-                        shell.publish((self.on_click)(f.analyzed_item.as_ref().map_or_else(
-                            || {
-                                parent.map_or_else(
-                                    || f.analyzed_item.as_ref().unwrap().path().to_owned(),
-                                    |f| f.analyzed_item.as_ref().unwrap().path().to_owned(),
-                                )
-                            },
-                            |f| f.path().to_owned(),
-                        )));
+                    if let Some(path) = highlighted
+                        .and_then(|hit| hit.path.clone().or_else(|| hit.parent_path.clone()))
+                    {
+                        shell.publish((self.on_click)(path));
                     }
                 }
                 _ => {}
@@ -646,7 +702,6 @@ impl<Message, Theme, Renderer: advanced::Renderer + text::Renderer> Widget<Messa
                 // 0,
                 state.highlighted,
                 self.text_size,
-                &self.state.extension_map,
             ) {
                 highlight = Some(r);
             }
