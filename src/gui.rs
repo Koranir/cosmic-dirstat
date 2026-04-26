@@ -22,7 +22,8 @@ enum Msg {
     CrawlPath { cancel: bool },
     CrawlPathDialogue,
     Crawl(PathBuf),
-    ExtensionLegendChanged(Vec<(OsString, Color)>),
+    PartitionViewRebuildRequested(partition_view::PartitionViewRebuild),
+    PartitionViewRebuilt(Arc<partition_view::PartitionViewBuild>),
     PaneResize(cosmic::widget::pane_grid::ResizeEvent),
     Analyzed(Arc<crate::analyze::AnalyzedDir>),
     AnalyzedError(String),
@@ -44,11 +45,36 @@ struct App {
     state: cosmic::widget::pane_grid::State<Panels>,
     tree: tree::FileTree,
     analyzed: Option<Arc<crate::analyze::AnalyzedDir>>,
+    partition_view: partition_view::PartitionViewState,
     error: Option<String>,
     extensions_ordered: Vec<(OsString, Color)>,
     highlighted: Option<(Point, String, u64, PathBuf)>,
 }
 impl App {
+    fn partition_rebuild_task(
+        &self,
+        request: partition_view::PartitionViewRebuild,
+    ) -> cosmic::app::Task<Msg> {
+        let Some(analyzed) = self.analyzed.clone() else {
+            return Task::none();
+        };
+        let base_col = cosmic::theme::active().cosmic().accent.base;
+
+        cosmic::Task::perform(
+            async move { partition_view::PartitionViewState::build(request, analyzed, base_col) },
+            |build| Msg::PartitionViewRebuilt(Arc::new(build)).into(),
+        )
+    }
+
+    fn request_partition_rebuild(
+        &mut self,
+        request: partition_view::PartitionViewRebuild,
+    ) -> cosmic::app::Task<Msg> {
+        self.partition_view
+            .request_rebuild(request)
+            .map_or_else(Task::none, |request| self.partition_rebuild_task(request))
+    }
+
     #[allow(dead_code)]
     pub fn legend_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{column, text};
@@ -105,10 +131,11 @@ impl App {
             Some(d) => cosmic::widget::tooltip(
                 partition_view::PartitionView::new(
                     d,
+                    &self.partition_view,
                     8.0,
                     8.0 * 8.0,
+                    Msg::PartitionViewRebuildRequested,
                     Msg::ItemClicked,
-                    Msg::ExtensionLegendChanged,
                     Msg::NewItemHighlighted,
                 ),
                 match self.highlighted.as_ref() {
@@ -223,6 +250,7 @@ impl cosmic::Application for App {
             crawling_path: false,
             state,
             analyzed: None,
+            partition_view: partition_view::PartitionViewState::new(),
             error: None,
             extensions_ordered: Vec::new(),
             highlighted: None,
@@ -292,13 +320,30 @@ impl cosmic::Application for App {
             Msg::Analyzed(a) => {
                 self.crawling_path = false;
                 self.analyzed = Some(a);
+                self.partition_view.clear();
+                self.extensions_ordered.clear();
+                self.highlighted = None;
             }
             Msg::AnalyzedError(e) => {
                 self.crawling_path = false;
                 self.error = Some(e);
             }
             Msg::ClearError => self.error = None,
-            Msg::ExtensionLegendChanged(l) => self.extensions_ordered = l,
+            Msg::PartitionViewRebuildRequested(request) => {
+                return self.request_partition_rebuild(request);
+            }
+            Msg::PartitionViewRebuilt(build) => {
+                let build = Arc::try_unwrap(build).unwrap_or_else(|build| (*build).clone());
+                let (applied, next) = self.partition_view.finish_rebuild(build);
+
+                if applied {
+                    self.extensions_ordered = self.partition_view.ordered_extensions().to_vec();
+                }
+
+                if let Some(request) = next {
+                    return self.partition_rebuild_task(request);
+                }
+            }
             Msg::NewItemHighlighted(h) => match h {
                 Some(s) => self.highlighted = Some(s),
                 None => self.highlighted = None,
