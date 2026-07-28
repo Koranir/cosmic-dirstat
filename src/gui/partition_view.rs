@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     ffi::OsString,
     path::PathBuf,
-    sync::Arc,
 };
 
 use cosmic::{
@@ -94,7 +93,7 @@ struct MapTransform {
     scale: Scale,
 }
 impl MapTransform {
-    fn root(origin: Point, scale: Scale) -> Self {
+    const fn root(origin: Point, scale: Scale) -> Self {
         Self {
             origin,
             at: (0.0, 0.0),
@@ -102,6 +101,7 @@ impl MapTransform {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn child(self, bounds: treemap::Rect) -> Self {
         Self {
             at: (self.at.0 + bounds.x as f32, self.at.1 + bounds.y as f32),
@@ -109,11 +109,12 @@ impl MapTransform {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn bounds(self, bounds: treemap::Rect) -> Rectangle {
         Rectangle::new(
             Point::new(
-                self.origin.x + (bounds.x as f32 + self.at.0) * self.scale.x,
-                self.origin.y + (bounds.y as f32 + self.at.1) * self.scale.y,
+                (bounds.x as f32 + self.at.0).mul_add(self.scale.x, self.origin.x),
+                (bounds.y as f32 + self.at.1).mul_add(self.scale.y, self.origin.y),
             ),
             Size::new(
                 bounds.w as f32 * self.scale.x,
@@ -204,7 +205,7 @@ impl StateBox {
             Quad {
                 bounds: quad_bounds,
                 border: Border::default(),
-                shadow: Default::default(),
+                shadow: Shadow::default(),
                 snap: true,
             },
             Background::Gradient(cosmic::iced::Gradient::Linear(
@@ -320,7 +321,7 @@ pub struct PartitionViewState {
     generation: u64,
 }
 impl PartitionViewState {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             boxes: Vec::new(),
             hit_boxes: Vec::new(),
@@ -340,7 +341,7 @@ impl PartitionViewState {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    pub fn rebuild_request(
+    pub const fn rebuild_request(
         &self,
         size: Size<f32>,
         path: PathBuf,
@@ -401,9 +402,10 @@ impl PartitionViewState {
             .map_or(Scale::ONE, |request| Scale::from_sizes(request.size, size))
     }
 
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub fn build(
         request: PartitionViewRebuild,
-        dir: Arc<AnalyzedDir>,
+        dir: &AnalyzedDir,
         base_col: cosmic::theme::CosmicColor,
     ) -> PartitionViewBuild {
         fn recursive_box(
@@ -459,11 +461,14 @@ impl PartitionViewState {
 
                     let idx = *next_idx;
                     *next_idx += 1;
-                    let name = item.item.map_or("<files>".into(), |f| {
-                        f.name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    });
+                    let name = item.item.map_or_else(
+                        || "<files>".into(),
+                        |f| {
+                            f.name()
+                                .map(|f| f.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        },
+                    );
                     let path = item.item.map(AnalyzedItem::path).map(PathBuf::from);
                     let label = format!(
                         "{} - {}",
@@ -493,7 +498,7 @@ impl PartitionViewState {
                 f64::from(request.size.height),
             ),
             f64::from(request.minimum_area),
-            &dir,
+            dir,
             f64::from(request.text_size),
             &mut extension_map,
             &mut next_idx,

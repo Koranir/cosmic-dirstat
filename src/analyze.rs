@@ -50,7 +50,7 @@ impl Context {
         self.errors.borrow().clone()
     }
 
-    fn record_error(&self, path: PathBuf, error: impl ToString) {
+    fn record_error(&self, path: PathBuf, error: &impl ToString) {
         self.errors.borrow_mut().push(ScanError {
             path,
             message: error.to_string(),
@@ -253,6 +253,7 @@ struct Scanner<'a> {
 }
 
 impl Scanner<'_> {
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn scan_dir(&self, dir: &Path, percentage_budget: f64) -> std::io::Result<AnalyzedDir> {
         self.ctx.check_cancelled()?;
 
@@ -274,7 +275,7 @@ impl Scanner<'_> {
                             Some((file_type, path))
                         }
                         Err(error) => {
-                            self.ctx.record_error(path, error);
+                            self.ctx.record_error(path, &error);
                             self.ctx.scanned(dir);
 
                             None
@@ -282,7 +283,7 @@ impl Scanner<'_> {
                     }
                 }
                 Err(error) => {
-                    self.ctx.record_error(dir.to_owned(), error);
+                    self.ctx.record_error(dir.to_owned(), &error);
                     None
                 }
             })
@@ -321,7 +322,7 @@ impl Scanner<'_> {
                 let analyzed = match self.scan_dir(&path, dir_budget) {
                     Ok(analyzed) => analyzed,
                     Err(error) => {
-                        self.ctx.record_error(path, error);
+                        self.ctx.record_error(path, &error);
                         self.ctx.scanned(dir);
                         continue;
                     }
@@ -338,7 +339,7 @@ impl Scanner<'_> {
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    self.ctx.record_error(path, error);
+                    self.ctx.record_error(path, &error);
                     self.ctx.scanned(dir);
                     continue;
                 }
@@ -350,7 +351,7 @@ impl Scanner<'_> {
                 let link = match fs::read_link(&path) {
                     Ok(link) => link,
                     Err(error) => {
-                        self.ctx.record_error(path, error);
+                        self.ctx.record_error(path, &error);
                         self.ctx.scanned(dir);
                         continue;
                     }
@@ -405,6 +406,7 @@ pub struct PartitionElement<'a> {
 }
 
 impl treemap::Mappable for PartitionElement<'_> {
+    #[allow(clippy::cast_precision_loss)]
     fn size(&self) -> f64 {
         self.size as f64
     }
@@ -423,7 +425,9 @@ pub fn partition(space: (f64, f64), min: f64, dir: &AnalyzedDir) -> Vec<Partitio
         return Vec::new();
     }
 
+    #[allow(clippy::cast_precision_loss)]
     let scale = dir.size as f64 / (space.0 * space.1);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let min_area = (min * scale) as u64;
     let end_index = dir
         .children

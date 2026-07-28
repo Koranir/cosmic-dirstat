@@ -22,7 +22,7 @@ pub struct FileTree {
 }
 
 impl FileTree {
-    pub fn new(location: PathBuf, files_config: cosmic_files::config::Config) -> Self {
+    pub fn new(location: PathBuf, files_config: &cosmic_files::config::Config) -> Self {
         Self {
             tab: cosmic_files::tab::Tab::new(
                 cosmic_files::tab::Location::Path(location),

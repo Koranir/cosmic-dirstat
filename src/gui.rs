@@ -84,7 +84,7 @@ impl App {
         }
 
         let (task, handle) = cosmic::Task::perform(
-            async move { partition_view::PartitionViewState::build(request, analyzed, base_col) },
+            async move { partition_view::PartitionViewState::build(request, &analyzed, base_col) },
             |build| Msg::PartitionViewRebuilt(Arc::new(build)).into(),
         )
         .abortable();
@@ -97,11 +97,9 @@ impl App {
         &mut self,
         request: partition_view::PartitionViewRebuild,
     ) -> cosmic::app::Task<Msg> {
-        if let Some(request) = self.partition_view.request_rebuild(request) {
-            self.partition_rebuild_task(request)
-        } else {
-            Task::none()
-        }
+        self.partition_view
+            .request_rebuild(request)
+            .map_or_else(Task::none, |request| self.partition_rebuild_task(request))
     }
 
     #[allow(dead_code)]
@@ -136,6 +134,7 @@ impl App {
             .into()
     }
 
+    #[allow(clippy::option_if_let_else)]
     pub fn partition_view(&self) -> cosmic::Element<'_, Msg> {
         use cosmic::widget::{button, column, container, icon, row, text};
 
@@ -230,6 +229,7 @@ impl App {
             };
 
             column::with_children(vec![
+                #[allow(clippy::cast_possible_truncation)]
                 cosmic::iced::widget::progress_bar(0.0..=100.0, progress.percentage as f32)
                     .girth(5.0)
                     .into(),
@@ -317,7 +317,7 @@ impl cosmic::Application for App {
             error: None,
             extensions_ordered: Vec::new(),
             highlighted: None,
-            tree: tree::FileTree::new(cwd, files_config),
+            tree: tree::FileTree::new(cwd, &files_config),
         };
 
         let task = app.tree.rescan();
@@ -325,17 +325,19 @@ impl cosmic::Application for App {
         (app, task.map(Msg::Tree).map(cosmic::Action::App))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
         match message {
             Msg::ItemClicked(s) => {
                 if s.is_dir() {
                     return self.update(Msg::CrawlPathChanged(s));
-                } else {
-                    if let Some(parent) = s.parent() {
-                        return self.update(Msg::CrawlPathChanged(parent.into())).chain(
-                            Task::done(cosmic::Action::App(Msg::Tree(tree::Msg::SelectPath(s)))),
-                        );
-                    }
+                }
+                if let Some(parent) = s.parent() {
+                    return self
+                        .update(Msg::CrawlPathChanged(parent.into()))
+                        .chain(Task::done(cosmic::Action::App(Msg::Tree(
+                            tree::Msg::SelectPath(s),
+                        ))));
                 }
             }
             Msg::CrawlPathChanged(s) => {
@@ -343,7 +345,7 @@ impl cosmic::Application for App {
                     return Task::none();
                 }
 
-                self.crawl_path = s.clone();
+                self.crawl_path.clone_from(&s);
                 self.tree.change_location(s);
                 return self.tree.rescan().map(Msg::Tree).map(cosmic::Action::App);
             }
@@ -366,7 +368,7 @@ impl cosmic::Application for App {
                     current_path: s.clone(),
                     percentage: 0.0,
                 });
-                self.crawl_path = s.clone();
+                self.crawl_path.clone_from(&s);
                 self.core.set_header_title(format!(
                     "COSMIC DirStat - {}",
                     self.crawl_path.to_string_lossy().into_owned()
